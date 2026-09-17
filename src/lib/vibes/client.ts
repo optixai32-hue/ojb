@@ -344,6 +344,31 @@ export class VibesClient {
     return this.request("PATCH", path, { json: jsonBody });
   }
 
+  /** POST with retry on transient 500 errors.
+   *
+   * vibes.ai's write endpoints (upload-image, upload-asset, etc.)
+   * occasionally return 500s due to internal rate limiting or DB
+   * contention. This helper retries up to 3 times with exponential
+   * backoff before giving up.
+   */
+  async _postWithRetry(
+    path: string,
+    jsonBody?: unknown,
+    maxRetries = 3,
+  ): Promise<any> {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await this._post(path, jsonBody);
+      } catch (e) {
+        lastErr = e;
+        if (!(e instanceof VibesAPIError) || e.status !== 500) throw e;
+        await sleep(1000 * (attempt + 1));
+      }
+    }
+    throw lastErr;
+  }
+
   // ------------------------------------------------------------------ //
   //  Auth & system
   // ------------------------------------------------------------------ //
@@ -500,7 +525,12 @@ export class VibesClient {
     return this._put(`/api/generation-batches/${batchId}`, updates);
   }
 
-  /** Internal helper: create a generation batch and return its ID. */
+  /** Internal helper: create a generation batch and return its ID.
+   *
+   * Retries up to 3 times on transient 500 errors — vibes.ai's
+   * /api/generation-batches endpoint occasionally returns a 500 right
+   * after a previous batch was created (race condition in their DB).
+   */
   private async createBatch(opts: {
     batchType: string; // "videos" or "images"
     prompt: string;
@@ -529,8 +559,19 @@ export class VibesClient {
       projectId: opts.projectId,
       content,
     };
-    await this._post("/api/generation-batches", body);
-    return batchId;
+    const maxRetries = 3;
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        await this._post("/api/generation-batches", body);
+        return batchId;
+      } catch (e) {
+        lastErr = e;
+        if (!(e instanceof VibesAPIError) || e.status !== 500) throw e;
+        await sleep(1000 * (attempt + 1));
+      }
+    }
+    throw lastErr;
   }
 
   // ------------------------------------------------------------------ //
@@ -737,6 +778,11 @@ export class VibesClient {
       config,
       count: opts.variations ?? 1,
     });
+    // CRITICAL: sleep to let the server-side DB row settle.
+    // Without this, the subsequent /api/generate/images call races with
+    // the batch creation and fails with "batch not found" or a 500.
+    // (matches generateVideo's behavior + the Python client)
+    await sleep(1000);
 
     const inputConfig: any = {
       imageModel,
@@ -764,14 +810,32 @@ export class VibesClient {
       });
     }
 
-    return this._post("/api/generate/images", { batchId, inputs, config });
+    // Retry the generate call — vibes.ai's /api/generate/images endpoint
+    // occasionally returns transient 500s right after batch creation
+    // (same race condition as listProjects / listBatches).
+    const maxRetries = 3;
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await this._post("/api/generate/images", { batchId, inputs, config });
+      } catch (e) {
+        lastErr = e;
+        if (!(e instanceof VibesAPIError) || e.status !== 500) throw e;
+        await sleep(1000 * (attempt + 1));
+      }
+    }
+    throw lastErr;
   }
 
   // ------------------------------------------------------------------ //
   //  IMAGE EDITING
   // ------------------------------------------------------------------ //
 
-  /** Edit an existing image with a text prompt. */
+  /** Edit an existing image with a text prompt.
+   *
+   * Retries up to 3 times on transient 500 errors (vibes.ai's image-edit
+   * endpoint occasionally fails right after a batch is created).
+   */
   async editImage(opts: {
     sourceImageEntId: string;
     editPrompt: string;
@@ -782,7 +846,19 @@ export class VibesClient {
       editPrompt: opts.editPrompt,
     };
     if (opts.projectId) body.projectId = opts.projectId;
-    return this._post("/api/generate/image-edit", body);
+
+    const maxRetries = 3;
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await this._post("/api/generate/image-edit", body);
+      } catch (e) {
+        lastErr = e;
+        if (!(e instanceof VibesAPIError) || e.status !== 500) throw e;
+        await sleep(1000 * (attempt + 1));
+      }
+    }
+    throw lastErr;
   }
 
   // ------------------------------------------------------------------ //
@@ -1390,14 +1466,20 @@ export class VibesClient {
   //  Uploads
   // ------------------------------------------------------------------ //
 
-  /** Upload a base64-encoded image. Returns `{ mediaEntId, imageUrl }`. */
+  /** Upload a base64-encoded image. Returns `{ mediaEntId, imageUrl }`.
+   *
+   * Retries up to 3 times on transient 500 errors.
+   */
   async uploadImage(imageBase64: string): Promise<any> {
-    return this._post("/api/upload-image", { image: imageBase64 });
+    return this._postWithRetry("/api/upload-image", { image: imageBase64 });
   }
 
-  /** Upload a base64-encoded image as a generic asset. */
+  /** Upload a base64-encoded image as a generic asset.
+   *
+   * Retries up to 3 times on transient 500 errors.
+   */
   async uploadAsset(imageBase64: string): Promise<any> {
-    return this._post("/api/upload-asset", { image: imageBase64 });
+    return this._postWithRetry("/api/upload-asset", { image: imageBase64 });
   }
 
   /** Upload a video file via multipart form data. */

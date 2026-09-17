@@ -223,3 +223,35 @@ Stage Summary:
 - The Meta AI sparkle watermark in the bottom-right corner is automatically removed before any image is displayed to the user
 - Uses only sharp (already in the project) — no extra native ML runtime needed
 - Falls back to original image if cleaning fails (never blocks the user)
+
+---
+Task ID: 6
+Agent: main (Z.ai Code)
+Task: Fix intermittent image generation/editing failures ("POURQUOI IMAGE TO IMAGE AVOIR DE PROBLEM PARFOI")
+
+Work Log:
+- Root cause analysis: identified TWO bugs causing intermittent failures:
+  1. **Missing sleep in generateImage()** — the createBatch() call was immediately followed by the /api/generate/images POST without waiting for the DB row to settle. This caused a race condition where vibes.ai's server hadn't committed the batch yet, returning "batch not found" or 500 errors. The generateVideo() method had this sleep(1000) but generateImage() was missing it.
+  2. **No retry logic on write endpoints** — vibes.ai's /api/generate/images, /api/generate/image-edit, /api/upload-image, and /api/generation-batches endpoints occasionally return transient 500s due to internal rate limiting or DB contention. The Python client had retry logic for listProjects and listBatches, but not for the generate/upload endpoints.
+- Also uninstalled onnxruntime-node (no longer used since we switched to sharp-only watermark removal) — its native module was causing silent server crashes
+- Fixes applied:
+  - Added `await sleep(1000)` after createBatch() in generateImage() (matches generateVideo behavior)
+  - Added retry logic (3 attempts, exponential backoff) to:
+    - createBatch() — retries on 500
+    - generateImage() — retries the /api/generate/images POST on 500
+    - editImage() — retries the /api/generate/image-edit POST on 500
+    - uploadImage() — retries the /api/upload-image POST on 500 (via new _postWithRetry helper)
+    - uploadAsset() — retries the /api/upload-asset POST on 500
+  - Added new _postWithRetry() helper method for POST + retry pattern
+  - Added vibesFetchWithRetry() on the frontend — retries POST/PUT calls on 500 errors with exponential backoff (1s, 2s, 3s)
+  - Updated all image-related frontend calls to use vibesFetchWithRetry():
+    - ImageGenerateCard: images/generate
+    - ImageEditCard: upload/image + images/edit
+    - StartEndFrameVideoCard: upload/image + images/generate
+
+Stage Summary:
+- All image operations now have retry logic (3 attempts with exponential backoff)
+- The race condition (missing sleep) is fixed
+- onnxruntime-node uninstalled — no more silent server crashes from native module conflicts
+- Verified: upload (5s), generate (14s), edit (14s) all succeed consecutively without server crash
+- Server stays alive through all operations (PID stable)

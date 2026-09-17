@@ -199,6 +199,33 @@ async function vibesFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return json as T
 }
 
+/**
+ * Fetch with retry — retries POST/PUT requests up to 3 times on 500 errors
+ * (which vibes.ai returns transiently during batch creation races).
+ * GETs are not retried here (the client-side hooks already handle refresh).
+ */
+async function vibesFetchWithRetry<T>(
+  path: string,
+  init: RequestInit,
+  maxRetries = 3,
+): Promise<T> {
+  let lastErr: unknown
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await vibesFetch<T>(path, init)
+    } catch (e: any) {
+      lastErr = e
+      // Only retry on 500-class errors (transient server errors)
+      const msg = e?.message || ''
+      const is500 = msg.includes('HTTP 5') || msg.includes('Internal Server Error')
+      if (!is500 || attempt === maxRetries) throw e
+      // Exponential backoff: 1s, 2s, 3s
+      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)))
+    }
+  }
+  throw lastErr
+}
+
 function useMounted() {
   // Canonical "is this running on the client" guard without a setState-in-effect.
   return React.useSyncExternalStore(
@@ -1244,7 +1271,7 @@ function ImageGenerateCard({ projects, onProjectCreated }: { projects: Project[]
     setSubmitting(true)
     setResult(null)
     try {
-      const res = await vibesFetch<ImageGenResponse>('/api/vibes/images/generate', {
+      const res = await vibesFetchWithRetry<ImageGenResponse>('/api/vibes/images/generate', {
         method: 'POST',
         body: JSON.stringify({
           project_id: projectId,
@@ -1488,7 +1515,7 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
         reader.onerror = reject
         reader.readAsDataURL(file)
       })
-      const res = await vibesFetch<{ mediaEntId?: string; imageUrl?: string }>('/api/vibes/upload/image', {
+      const res = await vibesFetchWithRetry<{ mediaEntId?: string; imageUrl?: string }>('/api/vibes/upload/image', {
         method: 'POST',
         body: JSON.stringify({ image_base64: base64 }),
       })
@@ -1518,7 +1545,7 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
     setSubmitting(true)
     setResult(null)
     try {
-      const res = await vibesFetch<ImageEditResult>('/api/vibes/images/edit', {
+      const res = await vibesFetchWithRetry<ImageEditResult>('/api/vibes/images/edit', {
         method: 'POST',
         body: JSON.stringify({
           source_image_ent_id: sourceImageEntId,
@@ -1759,7 +1786,7 @@ function StartEndFrameVideoCard({ projects, onProjectCreated }: { projects: Proj
       reader.onerror = reject
       reader.readAsDataURL(file)
     })
-    const res = await vibesFetch<{ mediaEntId?: string; imageUrl?: string }>('/api/vibes/upload/image', {
+    const res = await vibesFetchWithRetry<{ mediaEntId?: string; imageUrl?: string }>('/api/vibes/upload/image', {
       method: 'POST',
       body: JSON.stringify({ image_base64: base64 }),
     })
@@ -1773,7 +1800,7 @@ function StartEndFrameVideoCard({ projects, onProjectCreated }: { projects: Proj
       toast.error('Select or create a project first')
       return null
     }
-    const res = await vibesFetch<ImageGenResponse>('/api/vibes/images/generate', {
+    const res = await vibesFetchWithRetry<ImageGenResponse>('/api/vibes/images/generate', {
       method: 'POST',
       body: JSON.stringify({
         project_id: projectId,
