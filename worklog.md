@@ -255,3 +255,37 @@ Stage Summary:
 - onnxruntime-node uninstalled — no more silent server crashes from native module conflicts
 - Verified: upload (5s), generate (14s), edit (14s) all succeed consecutively without server crash
 - Server stays alive through all operations (PID stable)
+
+---
+Task ID: 7
+Agent: main (Z.ai Code)
+Task: Fix "You do not have access to this image" error when editing uploaded images
+
+Work Log:
+- Diagnosed root cause: vibes.ai's /api/generate/image-edit endpoint only accepts `imageEntId` from GENERATED images, NOT `mediaEntId` from uploaded images
+- Confirmed by testing:
+  - Upload → mediaEntId → editImage → "You do not have access to this image" ✗
+  - Generate → imageEntId → editImage → SUCCESS ✓
+  - bulkUploadToProject (to convert mediaEntId → imageEntId) → requires `uploadToken` we don't have ✗
+- Solution: dual-path approach in ImageEditCard
+  - **Library images** (generated, have real imageEntId): use editImage endpoint directly → works
+  - **Uploaded images** (only have mediaEntId): fall back to generateImage with the uploaded image as a STYLE ingredient via createIngredients → generates a new image inspired by the upload + prompt
+- Tested the workaround: upload → generateImage with createIngredients [{sourceImageEntId: mediaEntId, ingredientType: "STYLE"}] → SUCCESS
+- Added POST /api/vibes/projects/[pid]/upload route (for bulkUploadToProject, in case we need it later)
+- Updated ImageEditCard:
+  - Added `sourceType` state ('upload' | 'library') to track which path to use
+  - handleUploadFile sets sourceType='upload'
+  - handlePickFromLibrary sets sourceType='library'
+  - handleEdit branches: upload → generateImage with STYLE ingredient, library → editImage directly
+  - Updated button text: "Generate from upload" vs "Edit image"
+  - Added contextual help messages (amber for uploads, emerald for library)
+  - Made projectId required for uploads (generateImage needs it)
+  - Reset sourceType when clicking "Change"
+
+Stage Summary:
+- BOTH paths now work:
+  1. Upload image → type prompt → click "Generate from upload" → generates new image using upload as style reference ✓
+  2. Pick from library → type prompt → click "Edit image" → edits the generated image directly ✓
+- No more "You do not have access to this image" error
+- The UX clearly communicates which mode is active via colored messages and dynamic button text
+- Lint passes (0 errors)

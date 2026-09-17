@@ -1414,6 +1414,13 @@ interface ImageEditResult {
 function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; onProjectCreated: (p: Project) => void }) {
   const [sourceImageEntId, setSourceImageEntId] = useState('')
   const [sourceImageUrl, setSourceImageUrl] = useState('')
+  // Track whether the source is an uploaded image (mediaEntId) or a
+  // generated/library image (imageEntId). vibes.ai's /api/generate/image-edit
+  // endpoint only accepts imageEntIds from generated images — uploaded images
+  // (which only have mediaEntId) are rejected with "You do not have access to
+  // this image". For uploaded images, we fall back to generating a new image
+  // using the upload as a STYLE reference ingredient.
+  const [sourceType, setSourceType] = useState<'upload' | 'library'>('library')
   const [editPrompt, setEditPrompt] = useState('')
   const [projectId, setProjectId] = useState<string>(projects[0]?.id || '')
   const [submitting, setSubmitting] = useState(false)
@@ -1489,6 +1496,7 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
       }
       setSourceImageEntId(imageEntId)
       setSourceImageUrl(img.imageUrl || img.fullUrl || img.thumbnailUrl || '')
+      setSourceType('library')
       toast.success('Image selected from library')
     } catch (e: any) {
       toast.error(e?.message || 'Failed to load image details')
@@ -1522,6 +1530,7 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
       if (res.mediaEntId) {
         setSourceImageEntId(res.mediaEntId)
         setSourceImageUrl(res.imageUrl || '')
+        setSourceType('upload')
         toast.success('Image uploaded — ready to edit')
       } else {
         throw new Error('Upload did not return a mediaEntId')
@@ -1542,22 +1551,67 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
       toast.error('Edit prompt is required')
       return
     }
+    if (!projectId) {
+      toast.error('Select or create a project first')
+      return
+    }
     setSubmitting(true)
     setResult(null)
     try {
-      const res = await vibesFetchWithRetry<ImageEditResult>('/api/vibes/images/edit', {
-        method: 'POST',
-        body: JSON.stringify({
-          source_image_ent_id: sourceImageEntId,
-          edit_prompt: editPrompt.trim(),
-          project_id: projectId || undefined,
-        }),
-      })
-      setResult(res)
-      if (res.success !== false) {
-        toast.success('Image edited successfully')
+      if (sourceType === 'upload') {
+        // Uploaded images only have a mediaEntId, which vibes.ai's edit endpoint
+        // rejects with "You do not have access to this image". Instead, we
+        // generate a NEW image using the uploaded image as a STYLE reference
+        // ingredient — the result is a new image that combines the uploaded
+        // image's style with the edit prompt.
+        toast.info('Generating from your upload as a style reference…')
+        const res = await vibesFetchWithRetry<ImageGenResponse>('/api/vibes/images/generate', {
+          method: 'POST',
+          body: JSON.stringify({
+            project_id: projectId,
+            prompt: editPrompt.trim(),
+            aspect_ratio: '1:1',
+            variations: 1,
+            create_ingredients: [{
+              sourceImageEntId: sourceImageEntId,
+              ingredientType: 'STYLE',
+              name: 'Uploaded reference',
+              imageUrl: sourceImageUrl,
+            }],
+          }),
+        })
+        // Convert the generate response to the ImageEditResult shape
+        const firstImage = res.data?.[0]
+        if (firstImage) {
+          setResult({
+            success: true,
+            contentItem: {
+              id: firstImage.imageEntId,
+              imageUrl: firstImage.url,
+              prompt: firstImage.prompt,
+              imageEntId: firstImage.imageEntId,
+            },
+          })
+          toast.success('Image generated from your upload!')
+        } else {
+          toast.error('Generation returned no images')
+        }
       } else {
-        toast.error('Edit returned no result')
+        // Library/generated images have a real imageEntId — use the edit endpoint directly.
+        const res = await vibesFetchWithRetry<ImageEditResult>('/api/vibes/images/edit', {
+          method: 'POST',
+          body: JSON.stringify({
+            source_image_ent_id: sourceImageEntId,
+            edit_prompt: editPrompt.trim(),
+            project_id: projectId || undefined,
+          }),
+        })
+        setResult(res)
+        if (res.success !== false) {
+          toast.success('Image edited successfully')
+        } else {
+          toast.error('Edit returned no result')
+        }
       }
     } catch (e: any) {
       toast.error(e?.message || 'Failed to edit image')
@@ -1575,6 +1629,16 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
         <CardDescription>
           Edit an existing image with a text prompt — pick from your library or upload a new one,
           then describe the change you want (e.g. “make it night time”, “add snow”).
+          {sourceType === 'upload' && (
+            <span className="mt-1 block text-xs text-amber-600 dark:text-amber-400">
+              ℹ️ Uploaded images are used as a style reference to generate a new image (vibes.ai doesn't support direct editing of uploads).
+            </span>
+          )}
+          {sourceType === 'library' && sourceImageEntId && (
+            <span className="mt-1 block text-xs text-emerald-600 dark:text-emerald-400">
+              ✓ Library image selected — direct editing is supported.
+            </span>
+          )}
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-6 lg:grid-cols-2">
@@ -1597,6 +1661,7 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
                   onClick={() => {
                     setSourceImageEntId('')
                     setSourceImageUrl('')
+                    setSourceType('library')
                   }}
                 >
                   <Plus className="size-3.5" /> Change
@@ -1677,7 +1742,12 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
           </div>
 
           <div className="space-y-2">
-            <Label>Project (optional)</Label>
+            <Label>
+              Project {sourceType === 'upload' && <span className="text-rose-500">*</span>}
+              {sourceType === 'upload' && (
+                <span className="ml-1 text-xs text-muted-foreground">(required for uploads)</span>
+              )}
+            </Label>
             <ProjectPicker
               projects={projects}
               value={projectId}
@@ -1688,12 +1758,15 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
 
           <Button
             onClick={handleEdit}
-            disabled={submitting || !sourceImageEntId}
+            disabled={submitting || !sourceImageEntId || (sourceType === 'upload' && !projectId)}
             className="w-full bg-amber-600 text-white hover:bg-amber-700"
             size="lg"
           >
             {submitting ? <Spinner className="size-4" /> : <Wand2 className="size-4" />}
-            {submitting ? 'Editing…' : 'Edit image'}
+            {submitting
+              ? (sourceType === 'upload' ? 'Generating…' : 'Editing…')
+              : (sourceType === 'upload' ? 'Generate from upload' : 'Edit image')
+            }
           </Button>
         </div>
 
