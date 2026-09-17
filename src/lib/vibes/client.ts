@@ -833,8 +833,10 @@ export class VibesClient {
 
   /** Edit an existing image with a text prompt.
    *
-   * Retries up to 3 times on transient 500 errors (vibes.ai's image-edit
-   * endpoint occasionally fails right after a batch is created).
+   * Retries up to 3 times on transient errors:
+   *   - HTTP 500 (server transient errors)
+   *   - "This content could not be generated" (vibes.ai's generation failure
+   *     — often succeeds on retry after a short delay)
    */
   async editImage(opts: {
     sourceImageEntId: string;
@@ -851,11 +853,41 @@ export class VibesClient {
     let lastErr: unknown;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        return await this._post("/api/generate/image-edit", body);
+        const result = await this._post("/api/generate/image-edit", body);
+        // Check for vibes.ai's "content could not be generated" error in the
+        // response body — it returns HTTP 200 with success:false
+        if (result?.success === false || result?.error) {
+          const errMsg = typeof result.error === "string"
+            ? result.error
+            : result.error?.message || "";
+          if (errMsg.includes("could not be generated") || errMsg.includes("try a different prompt")) {
+            // This is a transient generation failure — retry with a delay
+            if (attempt < maxRetries) {
+              await sleep(2000 * (attempt + 1)); // 2s, 4s, 6s
+              continue;
+            }
+          }
+          throw new VibesAPIError(
+            typeof result.error === "string" ? result.error : JSON.stringify(result.error),
+            { status: 422, response: result },
+          );
+        }
+        return result;
       } catch (e) {
         lastErr = e;
-        if (!(e instanceof VibesAPIError) || e.status !== 500) throw e;
-        await sleep(1000 * (attempt + 1));
+        if (e instanceof VibesAPIError) {
+          // Retry on 500 (transient server errors)
+          if (e.status === 500 && attempt < maxRetries) {
+            await sleep(1000 * (attempt + 1));
+            continue;
+          }
+          // Retry on "could not be generated" (generation failure)
+          if (e.message?.includes("could not be generated") && attempt < maxRetries) {
+            await sleep(2000 * (attempt + 1));
+            continue;
+          }
+        }
+        throw e;
       }
     }
     throw lastErr;

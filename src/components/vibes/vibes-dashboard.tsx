@@ -1577,10 +1577,6 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
     setSubmitting(true)
     setResult(null)
     try {
-      // Both uploaded images (registered via upload-media + project upload)
-      // and library images (with real imageEntId) now use the SAME edit endpoint.
-      // The upload flow registers the image in a project, which makes the
-      // mediaEntId a valid sourceImageEntId for the edit endpoint.
       const res = await vibesFetchWithRetry<ImageEditResult>('/api/vibes/images/edit', {
         method: 'POST',
         body: JSON.stringify({
@@ -1596,7 +1592,13 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
         toast.error('Edit returned no result')
       }
     } catch (e: any) {
-      toast.error(e?.message || 'Failed to edit image')
+      const msg = e?.message || 'Failed to edit image'
+      // Show a helpful message for vibes.ai's "content could not be generated" error
+      if (msg.includes('could not be generated') || msg.includes('try a different prompt')) {
+        toast.error('vibes.ai could not generate this edit. Try a different prompt or wait a moment and retry.', { duration: 6000 })
+      } else {
+        toast.error(msg)
+      }
     } finally {
       setSubmitting(false)
     }
