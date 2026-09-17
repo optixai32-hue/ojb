@@ -2,31 +2,33 @@
  * Meta AI watermark remover — server-side, using sharp only.
  *
  * Removes the Meta AI sparkle watermark from the bottom-right corner of
- * generated images using content-aware fill: extracts a region from just
- * left of the watermark, mirrors it, blurs slightly, and composites it
- * over the watermark with a feathered gradient mask for seamless blending.
+ * generated images using a mirror+blur+feather technique:
+ *   1. Extract a strip from just left of the watermark region
+ *   2. Flip it horizontally (mirror)
+ *   3. Resize to cover the watermark
+ *   4. Blur slightly to blend with surrounding content
+ *   5. Apply a feathered alpha mask (opaque center, transparent edges)
+ *   6. Composite over the original image
  *
- * This approach uses only `sharp` (already in the project) — no native
- * ML runtime required. It's fast, reliable, and produces good results
- * for the small corner watermark.
+ * Uses only `sharp` (already in the project) — no native ML runtime.
+ * Fast, reliable, produces good results for the small corner watermark.
  *
- * The watermark-remover project (https://github.com/youngkim0/watermark-remover)
- * uses the MI-GAN ONNX model for browser-based inpainting. Here we use a
- * simpler mirror+blur technique that achieves the same visual result for
- * the corner watermark case, without the overhead of loading a 27MB model.
+ * Inspired by the watermark-remover project
+ * (https://github.com/youngkim0/watermark-remover) which uses MI-GAN
+ * for browser-based inpainting. Here we use a simpler technique that
+ * achieves the same visual result for the corner watermark case without
+ * the overhead of loading a 27MB ONNX model.
  */
 
 import sharp from "sharp";
-import fs from "fs";
-import path from "path";
 
 // The Meta AI watermark sits in the bottom-right corner.
 // It's a small sparkle icon, roughly 6-9% of the image's dimensions.
-const WATERMARK_WIDTH_FRAC = 0.095; // 9.5% of image width
-const WATERMARK_HEIGHT_FRAC = 0.095; // 9.5% of image height
-const WATERMARK_INSET = 0.012; // 1.2% inset from the very edge
-const FEATHER = 0.3; // feather width as fraction of watermark size
-const SOURCE_OFFSET = 0.02; // how far left of the watermark to sample from
+const WATERMARK_WIDTH_FRAC = 0.10; // 10% of image width
+const WATERMARK_HEIGHT_FRAC = 0.10; // 10% of image height
+const WATERMARK_INSET = 0.01; // 1% inset from the very edge
+const FEATHER = 0.35; // feather width as fraction of watermark size
+const SOURCE_OFFSET = 0.03; // how far left of watermark to sample from
 
 /**
  * Remove the Meta AI watermark from an image buffer.
@@ -37,7 +39,11 @@ const SOURCE_OFFSET = 0.02; // how far left of the watermark to sample from
 export async function removeMetaWatermark(
   imageBuffer: Buffer | ArrayBuffer,
 ): Promise<Buffer> {
-  const src = sharp(Buffer.from(imageBuffer));
+  const inputBuf = Buffer.isBuffer(imageBuffer)
+    ? imageBuffer
+    : Buffer.from(imageBuffer);
+
+  const src = sharp(inputBuf);
   const meta = await src.metadata();
   const w = meta.width ?? 0;
   const h = meta.height ?? 0;
@@ -54,135 +60,200 @@ export async function removeMetaWatermark(
   const wmY = Math.max(0, h - wmH - inset);
 
   // Expand by feather for seamless blending
-  const featherX = Math.round(wmW * FEATHER);
-  const featherY = Math.round(wmH * FEATHER);
+  const featherX = Math.max(4, Math.round(wmW * FEATHER));
+  const featherY = Math.max(4, Math.round(wmH * FEATHER));
   const patchX = Math.max(0, wmX - featherX);
   const patchY = Math.max(0, wmY - featherY);
   const patchW = Math.min(w - patchX, wmW + featherX * 2);
   const patchH = Math.min(h - patchY, wmH + featherY * 2);
 
-  // Source region: sample from just left of the watermark, same height
+  if (patchW < 8 || patchH < 8) {
+    return src.png().toBuffer();
+  }
+
+  // Source region: sample from just left of the watermark, same height.
+  // This gives us "clean" pixels from the same image to mirror over the mark.
   const srcOffset = Math.round(Math.min(w, h) * SOURCE_OFFSET);
   const srcX = Math.max(0, patchX - patchW - srcOffset);
   const srcW = Math.min(patchX - srcX, patchW);
 
-  if (srcW < 4 || patchH < 4) {
-    // Not enough room for the mirror fill — return original
-    return src.png().toBuffer();
+  if (srcW < 4) {
+    // Not enough room left of the watermark — try sampling from above instead
+    const srcY2 = Math.max(0, patchY - patchH - srcOffset);
+    if (srcY2 < 4) {
+      return src.png().toBuffer();
+    }
+    // Sample from above, flip vertically
+    const sourceStrip = await sharp(inputBuf)
+      .extract({ left: patchX, top: srcY2, width: patchW, height: Math.min(patchY - srcY2, patchH) })
+      .toBuffer();
+    const flipped = await sharp(sourceStrip).flip().toBuffer();
+    const resized = await sharp(flipped)
+      .resize({ width: patchW, height: patchH, fit: "fill" })
+      .blur(2)
+      .toBuffer();
+    return compositeWithMask(inputBuf, resized, patchX, patchY, patchW, patchH, featherX, featherY);
   }
 
   // 1. Extract the source strip (from left of the watermark)
-  const sourceStrip = await sharp(Buffer.from(imageBuffer))
+  const sourceStrip = await sharp(inputBuf)
     .extract({ left: srcX, top: patchY, width: srcW, height: patchH })
     .toBuffer();
 
   // 2. Flip it horizontally to create a mirror
-  const mirrored = await sharp(sourceStrip)
-    .flop()
-    .toBuffer();
+  const mirrored = await sharp(sourceStrip).flop().toBuffer();
 
   // 3. Resize the mirrored strip to cover the full patch width
-  const resizedMirror = await sharp(mirrored)
-    .resize({ width: patchW, height: patchH, fit: "fill" })
-    .toBuffer();
-
   // 4. Apply a slight blur to blend with surrounding content
-  const blurred = await sharp(resizedMirror)
-    .blur(2)
+  const patch = await sharp(mirrored)
+    .resize({ width: patchW, height: patchH, fit: "fill" })
+    .blur(3)
     .toBuffer();
 
-  // 5. Create a gradient mask for feathered edges:
-  //    - fully opaque in the center (over the watermark)
-  //    - fades to transparent at the edges (to blend with original)
-  const mask = await createFeatherMask(patchW, patchH, featherX, featherY);
+  // 5 + 6. Composite with a feathered alpha mask
+  return compositeWithMask(inputBuf, patch, patchX, patchY, patchW, patchH, featherX, featherY);
+}
 
-  // 6. Composite the blurred mirror over the watermark using the mask
-  const patched = await sharp(blurred)
-    .ensureAlpha()
-    .joinChannel(mask)
-    .raw()
-    .toBuffer({ resolveWithObject: true });
+/**
+ * Composite a patch over the original image using a feathered alpha mask.
+ * The mask is opaque (white) in the center and fades to transparent (black)
+ * at the edges, so the patch blends smoothly with the original content.
+ */
+async function compositeWithMask(
+  originalBuf: Buffer,
+  patchBuf: Buffer,
+  patchX: number,
+  patchY: number,
+  patchW: number,
+  patchH: number,
+  featherX: number,
+  featherY: number,
+): Promise<Buffer> {
+  // Create the feathered alpha mask as a PNG with alpha channel.
+  // White = fully opaque (show the patch), black = transparent (show original).
+  const maskPng = await createFeatherMaskPng(patchW, patchH, featherX, featherY);
 
-  const patchedImage = sharp(patched.data, {
-    raw: { width: patched.info.width, height: patched.info.height, channels: 4 },
-  }).png();
+  // Ensure the patch has an alpha channel, then apply our mask to it.
+  // sharp's `joinChannel` adds the mask as the alpha channel of the patch.
+  // NOTE: joinChannel on a 3-channel RGB image adds it as the 4th (alpha)
+  // channel. We must NOT call ensureAlpha() first — that would make it
+  // 4-channel, and joinChannel would then try to add a 5th (invalid).
+  const patchMeta = await sharp(patchBuf).metadata();
+  const patchWithAlpha =
+    patchMeta.channels === 4
+      ? // Already has alpha — replace it by removing then re-joining
+        await sharp(patchBuf)
+          .removeAlpha()
+          .joinChannel(maskPng)
+          .toFormat("png")
+          .toBuffer()
+      : // 3-channel RGB — join the mask as the 4th (alpha) channel
+        await sharp(patchBuf)
+          .joinChannel(maskPng)
+          .toFormat("png")
+          .toBuffer();
 
-  // 7. Composite the patch onto the original image
-  const result = await sharp(Buffer.from(imageBuffer))
+  // Composite the masked patch over the original image.
+  // Only the opaque (white mask) center will show; the feathered edges
+  // blend with the original.
+  return sharp(originalBuf)
     .composite([
       {
-        input: await patchedImage.toBuffer(),
+        input: patchWithAlpha,
         top: patchY,
         left: patchX,
         blend: "over",
       },
     ])
-    .png()
+    .toFormat(meta_format(originalBuf), { quality: 92 })
     .toBuffer();
+}
 
-  return result;
+/** Detect the format of the input buffer to preserve it on output. */
+function meta_format(buf: Buffer): keyof sharp.FormatEnum {
+  // Check magic bytes
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+    return "jpeg";
+  }
+  if (buf.length >= 8 && buf.slice(0, 8).toString("hex") === "89504e470d0a1a0a") {
+    return "png";
+  }
+  if (
+    buf.length >= 12 &&
+    buf.slice(0, 4).toString("ascii") === "RIFF" &&
+    buf.slice(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return "webp";
+  }
+  // Default to PNG (lossless, supports alpha)
+  return "png";
 }
 
 /**
- * Create a feathered alpha mask (white = opaque in center, fading to black
- * at the edges). Used for compositing the mirror patch smoothly.
+ * Create a feathered alpha mask as a single-channel PNG.
+ * White (opaque) in the center, fading to black (transparent) at the edges.
+ *
+ * We build it via SVG (sharp can rasterize SVG), using a blurred white
+ * rectangle on a black background. The Gaussian blur creates the feather.
+ * The result is converted to true single-channel greyscale.
  */
-async function createFeatherMask(
+async function createFeatherMaskPng(
   w: number,
   h: number,
   featherX: number,
   featherY: number,
 ): Promise<Buffer> {
-  // Create a white rectangle with feathered edges using SVG
   const innerX = featherX;
   const innerY = featherY;
   const innerW = Math.max(1, w - featherX * 2);
   const innerH = Math.max(1, h - featherY * 2);
-  const blurR = Math.max(featherX, featherY);
+  const blurR = Math.max(featherX, featherY, 2);
 
   const svg = `<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <filter id="feather" x="-50%" y="-50%" width="200%" height="200%">
+    <filter id="f" x="-50%" y="-50%" width="200%" height="200%">
       <feGaussianBlur in="SourceGraphic" stdDeviation="${blurR}"/>
     </filter>
   </defs>
   <rect width="${w}" height="${h}" fill="black"/>
-  <rect x="${innerX}" y="${innerY}" width="${innerW}" height="${innerH}" fill="white" filter="url(#feather)"/>
+  <rect x="${innerX}" y="${innerY}" width="${innerW}" height="${innerH}" fill="white" filter="url(#f)"/>
 </svg>`;
 
-  const mask = await sharp(Buffer.from(svg))
-    .resize(w, h)
+  // Rasterize the SVG to greyscale raw. sharp's greyscale() on an SVG
+  // already produces a single-channel raw buffer (channels: 1).
+  const maskRaw = await sharp(Buffer.from(svg))
     .greyscale()
     .raw()
-    .toBuffer();
+    .toBuffer({ resolveWithObject: true });
 
-  return mask;
+  // If sharp gave us a single-channel buffer (channels: 1), use it directly.
+  // Otherwise (some sharp versions output 3-channel greyscale), extract ch 0.
+  let singleChannel: Buffer;
+  if (maskRaw.info.channels === 1) {
+    singleChannel = maskRaw.data;
+  } else {
+    singleChannel = Buffer.alloc(maskRaw.data.length / maskRaw.info.channels);
+    for (let i = 0; i < singleChannel.length; i++) {
+      singleChannel[i] = maskRaw.data[i * maskRaw.info.channels];
+    }
+  }
+
+  // Wrap as a single-channel PNG for joinChannel
+  return sharp(singleChannel, {
+    raw: { width: w, height: h, channels: 1 },
+  }).png().toBuffer();
 }
 
 /**
- * Check if the watermark model/data is available.
- * With the sharp-based approach, this is always true.
+ * Check if the watermark removal is available (always true with sharp).
  */
 export function hasWatermarkModel(): boolean {
   return true;
 }
 
-// Optional: keep the MI-GAN model path for reference, but we don't use it
-// in the sharp-based approach.
-const MI_GAN_MODEL_PATH = path.join(
-  process.cwd(),
-  "data",
-  "models",
-  "migan_pipeline_v2.onnx",
-);
-
 /**
- * Preload the model (no-op in the sharp-based approach).
- * Kept for API compatibility.
+ * Preload (no-op with sharp).
  */
 export async function preloadWatermarkModel(): Promise<void> {
-  // No-op — sharp doesn't need preloading
-  if (fs.existsSync(MI_GAN_MODEL_PATH)) {
-    // Model file exists but we use the sharp approach for reliability
-  }
+  // No-op
 }
