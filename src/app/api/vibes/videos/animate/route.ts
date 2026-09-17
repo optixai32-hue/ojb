@@ -30,23 +30,22 @@ function handleError(error: any) {
  *
  * Animate a still image into a video (image-to-video / i2v).
  *
- * This is the "Auto animate" / "Manual animate" feature from the Vibes UI.
- * Unlike generateVideo(start_frame=...) which uses directPromptImageHandle,
- * animateImage uses sourceContentItemIds to reference the image, making it
- * the correct method for animating an existing image from your library.
+ * Two ways to specify the source image:
  *
- * Body:
- *   - project_id (required)
- *   - batch_id (required) — the batch containing the source image
- *   - content_id (optional) — specific content item ID; defaults to first
- *   - prompt (optional) — manual animate directive; omit for auto animate
- *   - poll (optional, default false) — wait for completion
- *   - poll_timeout (optional, default 180s)
+ * 1. Direct source image (for uploaded images):
+ *    Body: { project_id, source_image: { id, imageUrl, prompt, mediaEntId }, prompt? }
+ *    Use this when the image was just uploaded — bypasses batch fetch
+ *    (uploaded batches use Firebase-style IDs that /api/generation-batches
+ *    can't find, causing "Generation batch not found" errors).
  *
- * Flow:
- *   1. Fetch the batch to get the full source image content item
- *   2. Call client.animateImage() with the source image
- *   3. Return the generation response (batchId for polling)
+ * 2. Batch reference (for library images):
+ *    Body: { project_id, batch_id, content_id?, prompt? }
+ *    Fetches the batch to get the full source image content item.
+ *
+ * Optional:
+ *   - prompt — manual animate directive; omit for auto animate
+ *   - poll (default false) — wait for completion
+ *   - poll_timeout (default 180s)
  */
 export async function POST(request: NextRequest) {
   if (!hasVibesCookie()) return notConfigured();
@@ -54,36 +53,62 @@ export async function POST(request: NextRequest) {
     const client = getVibesClient();
     const body = await request.json();
 
-    if (!body?.project_id || !body?.batch_id) {
+    if (!body?.project_id) {
       return NextResponse.json(
-        { error: "Fields `project_id` and `batch_id` are required." },
+        { error: "Field `project_id` is required." },
         { status: 400 },
       );
     }
 
-    // Fetch the batch to get the full source image content item
-    const batch = await client.getBatch(body.batch_id);
-    const content = batch.content ?? [];
-
-    if (content.length === 0) {
-      return NextResponse.json(
-        { error: "No content items found in the specified batch." },
-        { status: 404 },
-      );
-    }
-
-    // Find the specific content item by ID, or use the first one
     let sourceImage: any;
-    if (body.content_id) {
-      sourceImage = content.find((c: any) => c.id === body.content_id);
-      if (!sourceImage) {
+
+    if (body.source_image) {
+      // Direct source image specification (from upload)
+      // Construct the full source image object that animateImage needs
+      const si = body.source_image;
+      const mediaEntId = si.mediaEntId || si.imageEntId || "";
+      sourceImage = {
+        id: si.id || si.contentItemId || `upload-${mediaEntId}`,
+        imageUrl: si.imageUrl || si.cdnUrl || "",
+        prompt: si.prompt || si.filename || "Uploaded image",
+        imagePrompt: si.prompt || si.filename || "Uploaded image",
+        videoPrompt: si.prompt || si.filename || "Uploaded image",
+        // data must be a JSON string containing imageEntId for extractImageEntId()
+        data: JSON.stringify({ imageEntId: mediaEntId }),
+        mediaEntId,
+        imageHandle: si.imageHandle || mediaEntId || null,
+        config: si.config || {},
+        structuredOutput: si.structuredOutput || {},
+      };
+    } else if (body.batch_id) {
+      // Fetch the batch to get the full source image content item (library images)
+      const batch = await client.getBatch(body.batch_id);
+      const content = batch.content ?? [];
+
+      if (content.length === 0) {
         return NextResponse.json(
-          { error: `Content item ${body.content_id} not found in batch ${body.batch_id}.` },
+          { error: "No content items found in the specified batch." },
           { status: 404 },
         );
       }
+
+      // Find the specific content item by ID, or use the first one
+      if (body.content_id) {
+        sourceImage = content.find((c: any) => c.id === body.content_id);
+        if (!sourceImage) {
+          return NextResponse.json(
+            { error: `Content item ${body.content_id} not found in batch ${body.batch_id}.` },
+            { status: 404 },
+          );
+        }
+      } else {
+        sourceImage = content[0];
+      }
     } else {
-      sourceImage = content[0];
+      return NextResponse.json(
+        { error: "Either `source_image` or `batch_id` is required." },
+        { status: 400 },
+      );
     }
 
     // Check the image has an imageUrl
@@ -94,7 +119,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Call animateImage with the full source image content item
+    // Call animateImage with the source image
     const result = await client.animateImage({
       projectId: body.project_id,
       sourceImage,

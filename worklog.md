@@ -370,3 +370,35 @@ Stage Summary:
   4. Image to video (i2v animate) - cyan [NEW]
   5. Start/End frame video (i2v keyframes) - emerald
 - Lint passes (0 errors)
+
+---
+Task ID: 10
+Agent: main (Z.ai Code)
+Task: Fix "Generation batch not found" error in Image to Video for uploaded images
+
+Work Log:
+- Diagnosed root cause: uploaded images are registered in a batch with a Firebase-style ID
+  (e.g. "-SIzbocuErLntrpQJWTUc" or "WeyLVclpJI-H6rdft1BIP"), but the animate route was
+  calling client.getBatch(batchId) which fetches /api/generation-batches/{id} — and this
+  endpoint returns 404 "Generation batch not found" for Firebase-style IDs because they
+  were created by the upload system, not the generation-batches API.
+- Fix: updated POST /api/vibes/videos/animate to accept a DIRECT `source_image` object
+  that bypasses the batch fetch entirely:
+  - If body.source_image is provided (from upload): construct the source image object
+    directly from {id, imageUrl, mediaEntId, prompt} — no batch fetch needed
+  - If body.batch_id is provided (from library): fetch the batch as before
+- The source_image object is constructed server-side with all fields that animateImage()
+  needs: id, imageUrl, prompt, imagePrompt, data (JSON string with imageEntId), mediaEntId,
+  imageHandle, config, structuredOutput
+- Updated ImageToVideoCard:
+  - Added sourceImageData state to track uploaded image data directly
+  - handleUploadFile now stores {mediaEntId, imageUrl, contentItemId} without fetching batches
+  - handleAnimate sends source_image directly for uploads, or batch_id for library images
+  - Updated button disabled condition and "Change" button to handle both modes
+
+Stage Summary:
+- Upload → Animate now works: no more "Generation batch not found" error
+- The animate route accepts both source_image (for uploads) and batch_id (for library)
+- Tested: upload (6.9s) → animate (9.3s) → SUCCESS, batchId: image2video-1789676936108-7b835adc
+- Server stays alive throughout
+- Lint passes (0 errors)

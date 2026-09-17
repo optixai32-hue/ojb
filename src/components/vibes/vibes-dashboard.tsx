@@ -1802,6 +1802,12 @@ function ImageToVideoCard({ projects, onProjectCreated }: { projects: Project[];
   const [sourceImageUrl, setSourceImageUrl] = useState('')
   const [sourceBatchId, setSourceBatchId] = useState('')
   const [sourceContentId, setSourceContentId] = useState('')
+  // For uploaded images, we store the source image data directly (no batch fetch needed)
+  const [sourceImageData, setSourceImageData] = useState<{
+    mediaEntId?: string
+    imageUrl?: string
+    contentItemId?: string
+  } | null>(null)
   const [animatePrompt, setAnimatePrompt] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [polling, setPolling] = useState(false)
@@ -1832,6 +1838,7 @@ function ImageToVideoCard({ projects, onProjectCreated }: { projects: Project[];
     setSourceBatchId(img.batchId)
     setSourceContentId(img.id)
     setSourceImageUrl(img.imageUrl || img.fullUrl || img.thumbnailUrl || '')
+    setSourceImageData(null) // library images use batch_id, not source_image
     toast.success('Image selected — ready to animate')
   }
 
@@ -1846,6 +1853,7 @@ function ImageToVideoCard({ projects, onProjectCreated }: { projects: Project[];
     }
     setSubmitting(true)
     try {
+      // Upload via multipart + register in project (same as Edit image flow)
       const formData = new FormData()
       formData.set('file', file, file.name)
       formData.set('filename', file.name)
@@ -1859,36 +1867,18 @@ function ImageToVideoCard({ projects, onProjectCreated }: { projects: Project[];
         throw new Error(errMsg)
       }
       const data = await res.json()
-      // After upload + register, the image is in a new batch.
-      // We need to find that batch to get the content item for animating.
-      // List the project's batches to find the most recent one.
-      const batchesResp = await vibesFetch<{ batches?: string[] }>(
-        `/api/vibes/batches?limit=5&project_id=${projectId}`,
-      )
-      const batchIds = batchesResp.batches ?? []
-      // Find the batch that contains our uploaded image
-      let foundBatchId = ''
-      let foundContentId = ''
-      for (const bid of batchIds) {
-        try {
-          const b = await vibesFetch<Batch>(`/api/vibes/batches/${bid}`)
-          const content = b.content ?? []
-          const match = content.find((c) => c.imageUrl === data.imageUrl || c.id === data.contentItemId)
-          if (match) {
-            foundBatchId = bid
-            foundContentId = match.id
-            break
-          }
-        } catch { /* skip */ }
-      }
-      if (!foundBatchId) {
-        // Fallback: use the data we have
-        foundBatchId = data.contentItemId || ''
-        foundContentId = data.contentItemId || ''
-      }
-      setSourceBatchId(foundBatchId)
-      setSourceContentId(foundContentId)
+      // Store the source image data directly — no need to fetch the batch.
+      // The animate route accepts a `source_image` object that bypasses
+      // the batch fetch (which fails for uploaded images because they use
+      // Firebase-style batch IDs that /api/generation-batches can't find).
+      setSourceImageData({
+        mediaEntId: data.mediaEntId,
+        imageUrl: data.imageUrl,
+        contentItemId: data.contentItemId,
+      })
       setSourceImageUrl(data.imageUrl || '')
+      setSourceBatchId('') // clear — we use source_image instead
+      setSourceContentId('')
       toast.success('Image uploaded — ready to animate')
     } catch (e: any) {
       toast.error(e?.message || 'Failed to upload image')
@@ -1898,7 +1888,7 @@ function ImageToVideoCard({ projects, onProjectCreated }: { projects: Project[];
   }
 
   async function handleAnimate() {
-    if (!sourceBatchId) {
+    if (!sourceBatchId && !sourceImageData) {
       toast.error('Select or upload a source image first')
       return
     }
@@ -1909,15 +1899,28 @@ function ImageToVideoCard({ projects, onProjectCreated }: { projects: Project[];
     setSubmitting(true)
     setBatch(null)
     try {
+      const body: any = {
+        project_id: projectId,
+        prompt: animatePrompt.trim() || undefined,
+        poll: false,
+      }
+      if (sourceImageData) {
+        // Uploaded image — pass source_image directly (bypasses batch fetch)
+        body.source_image = {
+          id: sourceImageData.contentItemId,
+          imageUrl: sourceImageData.imageUrl,
+          mediaEntId: sourceImageData.mediaEntId,
+          prompt: animatePrompt.trim() || 'Uploaded image',
+        }
+      } else {
+        // Library image — use batch_id + content_id (fetches batch server-side)
+        body.batch_id = sourceBatchId
+        body.content_id = sourceContentId || undefined
+      }
+
       const res = await vibesFetchWithRetry<VideoGenResponse>('/api/vibes/videos/animate', {
         method: 'POST',
-        body: JSON.stringify({
-          project_id: projectId,
-          batch_id: sourceBatchId,
-          content_id: sourceContentId || undefined,
-          prompt: animatePrompt.trim() || undefined,
-          poll: false,
-        }),
+        body: JSON.stringify(body),
       })
       const batchId = res.batchId || res.batch?.id || res.id
       if (!batchId) throw new Error('No batchId returned from animate call')
@@ -1971,7 +1974,7 @@ function ImageToVideoCard({ projects, onProjectCreated }: { projects: Project[];
         <CardDescription>
           Animate a still image into a ~5 second video (image-to-video). Pick from your library or
           upload a new image, optionally add a motion directive, then animate.
-          {sourceBatchId && (
+          {(sourceBatchId || sourceImageData) && (
             <span className="mt-1 block text-xs text-emerald-600 dark:text-emerald-400">
               ✓ Image selected — ready to animate.
             </span>
@@ -1995,6 +1998,7 @@ function ImageToVideoCard({ projects, onProjectCreated }: { projects: Project[];
                     setSourceImageUrl('')
                     setSourceBatchId('')
                     setSourceContentId('')
+                    setSourceImageData(null)
                   }}
                 >
                   <Plus className="size-3.5" /> Change
@@ -2081,14 +2085,14 @@ function ImageToVideoCard({ projects, onProjectCreated }: { projects: Project[];
 
           <Button
             onClick={handleAnimate}
-            disabled={submitting || !sourceBatchId}
+            disabled={submitting || (!sourceBatchId && !sourceImageData)}
             className="w-full bg-cyan-600 text-white hover:bg-cyan-700"
             size="lg"
           >
             {submitting ? <Spinner className="size-4" /> : <Film className="size-4" />}
             {submitting ? 'Starting…' : animatePrompt.trim() ? 'Animate with directive' : 'Auto animate'}
           </Button>
-          {!sourceBatchId && (
+          {!sourceBatchId && !sourceImageData && (
             <p className="text-center text-xs text-muted-foreground">
               Select or upload an image to enable animation
             </p>
