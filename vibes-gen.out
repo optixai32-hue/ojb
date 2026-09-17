@@ -1,0 +1,15 @@
+[17:26:00] === VibesAI First Video Generation ===
+[17:26:00] Cookie: a8b294f2-9d53-4546-a...xTNkzA
+[17:26:00] Project ID: d53d52cd-39d0-4086-80ae-ec7b26f306b8
+[17:26:00] Prompt: A serene mountain landscape at sunset with golden light washing over the peaks, cinematic aerial shot
+[17:26:00] 
+[17:26:00] [1/5] Building VibesClient...
+[17:26:01]       Authenticated as: jonathan.yannick.08 (status=ACTIVE)
+[17:26:01] [2/5] Verifying project exists...
+[17:26:02]       Project name: Z.ai First Video Demo
+[17:26:02] [3/5] Checking for existing in-progress batches...
+[17:26:07]       Found 2 batches on this project
+[17:26:07]       (could not list batches: 'str' object has no attribute 'get')
+[17:26:07] [4/5] No in-progress batch. Triggering new video generation...
+[17:26:07]       Settings: 16:9, 480p, 1 variation
+[17:26:07]       (this triggers create-batch + generate + auto-poll up to 300s)
