@@ -42,7 +42,8 @@ export const API_ENDPOINTS: ApiEndpoint[] = [
   { method: 'POST', path: '/api/vibes/upload/image', category: 'Generation', description: 'Upload a base64-encoded image (no uploadToken).' },
   { method: 'POST', path: '/api/vibes/upload/media', category: 'Generation', description: 'Upload image via multipart + register in project (returns uploadToken, enables editing).' },
   { method: 'POST', path: '/api/vibes/prompts/enhance', category: 'Generation', description: 'Enhance a prompt into multiple variations.' },
-  { method: 'POST', path: '/api/vibes/watermark/clean', category: 'Generation', description: 'Remove Meta AI watermark from an image (mirror+blur+feather).' },
+  { method: 'POST', path: '/api/vibes/watermark/clean', category: 'Generation', description: 'Remove Meta AI watermark from an image (server-side sharp mirror+blur, or client-side OpenCV.js).' },
+  { method: 'GET', path: '/api/vibes/image-proxy', category: 'Generation', description: 'Proxy an image URL with CORS headers (for OpenCV.js canvas readback).' },
 
   { method: 'GET', path: '/api/vibes/voices', category: 'Studio', description: 'List all 41 PlayAI TTS voices.' },
   { method: 'POST', path: '/api/vibes/tts', category: 'Studio', description: 'Synthesize speech { text, voice, output_format? }.' },

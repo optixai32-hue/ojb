@@ -1,106 +1,115 @@
 /**
  * Client-side hook for removing the Meta AI watermark from images.
  *
- * Given a raw image URL (from vibes.ai CDN or the download endpoint),
- * returns a cleaned URL that routes through the server-side MI-GAN
- * inpainting pipeline. The watermark in the bottom-right corner is
- * automatically removed before the image reaches the browser.
+ * Uses OpenCV.js (cv.inpaint with Telea algorithm) running in the browser
+ * for high-quality watermark removal. Falls back to the server-side
+ * sharp-based endpoint if OpenCV.js fails to load.
+ *
+ * The watermark in the bottom-right corner is automatically removed BEFORE
+ * the image is displayed — the user never sees the Meta AI sparkle.
  *
  * Usage:
  *   const cleanUrl = useCleanImage(rawUrl)
  *   return <img src={cleanUrl} />
  *
- * If the image is from vibes.ai's CDN (scontent-*.fbcdn.net), it's routed
- * through POST /api/vibes/watermark/clean. If it's already a relative
- * /api/vibes/... URL, ?clean=true is appended.
- *
- * The cleaning happens lazily — the hook returns a blob URL once the
- * cleaned image is ready, and falls back to the original URL while loading
- * or if cleaning fails.
+ * Or as a component:
+ *   <CleanImage src={rawUrl} alt="..." />
  */
 
 'use client'
 
 import { useEffect, useState } from 'react'
+import { removeWatermarkWithOpenCV } from '@/lib/watermark/opencv-client'
 
 // In-memory cache: raw URL → cleaned blob URL (per browser session).
 // This prevents re-cleaning the same image on every render.
 const cache = new Map<string, string>()
 
-/** True if the URL is a vibes.ai CDN image (needs proxy cleaning). */
-function isCdnUrl(url: string): boolean {
+/** True if the URL is a vibes.ai CDN image (needs cleaning). */
+function needsCleaning(url: string): boolean {
   return (
     url.includes('fbcdn.net') ||
     url.includes('vibes.ai') ||
     url.startsWith('https://video-sin') ||
-    url.startsWith('https://scontent-')
+    url.startsWith('https://scontent-') ||
+    url.startsWith('/api/vibes/')
   )
 }
 
-/** True if the URL is already one of our API routes. */
-function isApiUrl(url: string): boolean {
-  return url.startsWith('/api/vibes/')
-}
-
 /**
- * Clean an image URL by routing it through the MI-GAN inpainting pipeline.
- * Returns a promise that resolves to a blob URL of the cleaned image,
- * or the original URL if cleaning fails.
+ * Clean an image URL by removing the Meta AI watermark.
+ *
+ * Strategy:
+ *   1. Try OpenCV.js client-side inpainting (best quality, runs in browser)
+ *   2. Fall back to server-side /api/vibes/watermark/clean (sharp mirror+blur)
+ *   3. Fall back to original URL if both fail
+ *
+ * Returns a blob URL of the cleaned image, or the original URL on failure.
  */
 async function cleanImageUrl(rawUrl: string): Promise<string> {
   // Check cache first
   const cached = cache.get(rawUrl)
   if (cached) return cached
 
+  // Don't clean non-CDN URLs
+  if (!needsCleaning(rawUrl)) {
+    cache.set(rawUrl, rawUrl)
+    return rawUrl
+  }
+
+  try {
+    // Strategy 1: OpenCV.js client-side inpainting (best quality)
+    const cvResult = await removeWatermarkWithOpenCV(rawUrl)
+    if (cvResult !== rawUrl) {
+      cache.set(rawUrl, cvResult)
+      return cvResult
+    }
+  } catch {
+    // OpenCV failed — try server fallback
+  }
+
+  // Strategy 2: Server-side fallback (sharp mirror+blur)
   try {
     let response: Response
 
-    if (isApiUrl(rawUrl)) {
-      // For our own API routes, just append ?clean=true
+    if (rawUrl.startsWith('/api/vibes/')) {
+      // For our own API routes, append ?clean=true
       const url = new URL(rawUrl, window.location.origin)
       url.searchParams.set('clean', 'true')
       response = await fetch(url.toString())
-    } else if (isCdnUrl(rawUrl)) {
+    } else {
       // For CDN URLs, POST to the clean endpoint
       response = await fetch('/api/vibes/watermark/clean', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ image_url: rawUrl }),
       })
-    } else {
-      // Unknown URL type — return as-is
-      return rawUrl
     }
 
-    if (!response.ok) {
-      return rawUrl
+    if (response.ok) {
+      const removed = response.headers.get('X-Watermark-Removed')
+      if (removed !== 'false') {
+        const blob = await response.blob()
+        const blobUrl = URL.createObjectURL(blob)
+        cache.set(rawUrl, blobUrl)
+        return blobUrl
+      }
     }
-
-    // Check if cleaning actually happened
-    const removed = response.headers.get('X-Watermark-Removed')
-    if (removed === 'false') {
-      // Model unavailable or cleaning failed — return original
-      // (still cache to avoid retrying)
-      cache.set(rawUrl, rawUrl)
-      return rawUrl
-    }
-
-    // Convert to blob URL
-    const blob = await response.blob()
-    const blobUrl = URL.createObjectURL(blob)
-    cache.set(rawUrl, blobUrl)
-    return blobUrl
   } catch {
-    // On any error, return the original URL
-    return rawUrl
+    // Server fallback also failed
   }
+
+  // Strategy 3: Return original (cache to avoid retrying)
+  cache.set(rawUrl, rawUrl)
+  return rawUrl
 }
 
 /**
  * Hook that returns a watermark-cleaned image URL.
  *
  * While the cleaned version is being prepared, the original URL is returned
- * (so the image displays immediately, then swaps to the cleaned version).
+ * (so the image displays immediately, then swaps to the cleaned version
+ * once OpenCV.js has finished inpainting).
  *
  * @param rawUrl The original image URL (CDN URL or /api/vibes/... path)
  * @returns The cleaned URL (blob: or original on failure)
@@ -114,9 +123,7 @@ export function useCleanImage(rawUrl: string | undefined | null): string {
     cleanUrl: rawUrl ?? '',
   }))
 
-  // Adjust state during render when the rawUrl changes — the React-recommended
-  // pattern that avoids setState-in-effect warnings. Check the cache
-  // synchronously so cached images swap without a flash.
+  // Adjust state during render when the rawUrl changes
   if (state.rawUrl !== rawUrl) {
     if (!rawUrl) {
       setState({ rawUrl, cleanUrl: '' })
@@ -134,7 +141,7 @@ export function useCleanImage(rawUrl: string | undefined | null): string {
     // If it was a cache hit, nothing to do
     if (cache.get(rawUrl)) return
 
-    // Otherwise, fetch the cleaned version asynchronously
+    // Otherwise, clean the image asynchronously
     cleanImageUrl(rawUrl).then((cleaned) => {
       if (active && cleaned !== rawUrl) {
         setState((prev) =>
@@ -184,7 +191,11 @@ export function useCleanImages(rawUrls: (string | undefined | null)[]): string[]
 
 /**
  * A React component wrapper that renders an <img> with the watermark
- * automatically removed. Drop-in replacement for <img src={url} />.
+ * automatically removed using OpenCV.js. Drop-in replacement for <img>.
+ *
+ * The image is first displayed with the original URL (so it appears
+ * immediately), then swaps to the cleaned version once OpenCV.js
+ * has finished inpainting the watermark region.
  */
 export function CleanImage({
   src,

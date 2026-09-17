@@ -402,3 +402,43 @@ Stage Summary:
 - Tested: upload (6.9s) → animate (9.3s) → SUCCESS, batchId: image2video-1789676936108-7b835adc
 - Server stays alive throughout
 - Lint passes (0 errors)
+
+---
+Task ID: 11
+Agent: main (Z.ai Code)
+Task: Add @techstark/opencv-js for client-side watermark removal
+
+Work Log:
+- Installed @techstark/opencv-js (OpenCV.js v5.0.0, 13MB WASM bundled in JS)
+- Copied opencv.js to public/ for static serving (avoids bundling 13MB into client bundle)
+- Added cache headers in next.config.ts (immutable, 1 year) so the browser caches it
+- Created src/lib/watermark/opencv-client.ts:
+  - loadOpenCV(): lazy-loads opencv.js via <script> tag (only when first image needs cleaning)
+  - removeWatermarkWithOpenCV(): uses cv.inpaint() with Telea algorithm to remove the watermark
+    1. Loads OpenCV.js lazily (cached after first load)
+    2. Fetches image via /api/vibes/image-proxy (avoids CORS tainted canvas)
+    3. Draws image to canvas
+    4. Creates a mask (white rectangle) over the bottom-right corner (10% of dimensions)
+    5. Runs cv.inpaint(srcMat, maskMat, dstMat, 5, cv.INPAINT_TELEA) — Telea fast marching algorithm
+    6. Converts result canvas to blob URL
+    7. Cleans up OpenCV Mats to prevent memory leaks
+  - Falls back to original URL if OpenCV fails to load
+- Created GET /api/vibes/image-proxy route:
+  - Proxies image URLs with CORS headers (Access-Control-Allow-Origin: *)
+  - Lightweight — no watermark processing, just fetches and returns raw image bytes
+  - Needed because fbcdn.net CDN images don't return CORS headers, which would taint the canvas
+  - OpenCV.js needs to read pixel data from canvas (toBlob/getImageData)
+- Updated CleanImage component (clean-image.tsx):
+  - Strategy: OpenCV.js client-side inpainting (best quality) → server fallback (sharp) → original
+  - cleanImageUrl() now tries removeWatermarkWithOpenCV() first
+  - Falls back to /api/vibes/watermark/clean (server-side sharp) if OpenCV fails
+  - Falls back to original URL if both fail
+  - Cache is shared between both strategies
+- Updated ESLint config to ignore public/ (opencv.js has lint errors from the WASM bundle)
+
+Stage Summary:
+- OpenCV.js (cv.inpaint Telea algorithm) is now used for client-side watermark removal
+- The 13MB WASM is loaded lazily via <script> tag, cached by browser after first load
+- Image proxy endpoint handles CORS for CDN images
+- Dual-strategy: OpenCV client-side (primary) → sharp server-side (fallback)
+- Lint passes, all endpoints verified
