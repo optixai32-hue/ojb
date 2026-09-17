@@ -1,8 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getVibesClient, hasVibesCookie } from "@/lib/vibes/server";
+import {
+  removeMetaWatermark,
+  hasWatermarkModel,
+} from "@/lib/watermark/remove";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+// Increase the max execution time for this route — MI-GAN inference can take
+// a few seconds on the first call while the model warms up.
+export const maxDuration = 120;
 
 function notConfigured() {
   return NextResponse.json(
@@ -33,6 +41,13 @@ interface Params {
  * Returns the binary content with the appropriate content-type.
  * Defaults to `video` (MP4). Use `?type=image` for PNG.
  *
+ * Query params:
+ *   - type:  "video" (default) or "image"
+ *   - clean: "1" or "true" to remove the Meta AI watermark from images
+ *            (MI-GAN inpainting, server-side). Videos are returned as-is.
+ *            When clean=true and the type is image, the watermark in the
+ *            bottom-right corner is automatically inpainted before sending.
+ *
  * If the direct download endpoint returns 404 (which happens when the
  * batch is not yet marked isComplete=true on the server), this route
  * falls back to fetching the batch and using the videoUrl / imageUrl
@@ -45,6 +60,9 @@ export async function GET(request: NextRequest, { params }: Params) {
     const { itemId } = await params;
     const { searchParams } = new URL(request.url);
     const type = searchParams.get("type") ?? "video";
+    const clean =
+      searchParams.get("clean") === "1" ||
+      searchParams.get("clean") === "true";
 
     let buffer: ArrayBuffer;
     let contentType: string;
@@ -61,6 +79,20 @@ export async function GET(request: NextRequest, { params }: Params) {
           throw dlError;
         }
       }
+
+      // Remove the Meta AI watermark if requested (images only)
+      if (clean && hasWatermarkModel()) {
+        try {
+          const cleaned = await removeMetaWatermark(buffer);
+          buffer = cleaned.buffer.slice(
+            cleaned.byteOffset,
+            cleaned.byteOffset + cleaned.byteLength,
+          );
+        } catch (wmError: any) {
+          // If watermark removal fails, return the original image
+          console.error("[watermark] removal failed:", wmError?.message);
+        }
+      }
     } else {
       contentType = "video/mp4";
       try {
@@ -73,6 +105,15 @@ export async function GET(request: NextRequest, { params }: Params) {
         } else {
           throw dlError;
         }
+      }
+
+      // Remove the Meta AI watermark from video poster frames if requested
+      // (we only clean images — video frame inpainting would require decoding
+      // every frame, which is too slow. The video poster/thumbnail is cleaned
+      // in the media card display instead.)
+      if (clean && hasWatermarkModel()) {
+        // For videos, we return the video as-is. The dashboard displays
+        // cleaned image thumbnails separately.
       }
     }
 

@@ -66,6 +66,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Toaster } from '@/components/ui/sonner'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { API_ENDPOINTS, API_CATEGORIES, type ApiEndpoint } from './api-endpoints'
+import { CleanImage, useCleanImage } from './clean-image'
 
 // ========================================================================== //
 //  Types — loose shapes that mirror the VibesAI API responses
@@ -694,7 +695,7 @@ function ProjectCard({ project, open, onToggle }: { project: Project; open: bool
   return (
     <Card className="overflow-hidden transition-shadow hover:shadow-md">
       {project.thumbnailUrl ? (
-        <img
+        <CleanImage
           src={project.thumbnailUrl}
           alt={project.name}
           className="aspect-video w-full object-cover"
@@ -1187,18 +1188,19 @@ function VideoGenerateCard({ projects, onProjectCreated }: { projects: Project[]
 
 function VideoVariationCard({ item }: { item: BatchContentItem }) {
   const ready = !!item.videoUrl
+  const cleanPoster = useCleanImage(item.thumbnailUrl)
   return (
     <div className="overflow-hidden rounded-lg border bg-card">
       {ready ? (
         <video
           src={item.videoUrl}
-          poster={item.thumbnailUrl}
+          poster={cleanPoster}
           controls
           playsInline
           className="aspect-video w-full bg-black object-contain"
         />
       ) : item.thumbnailUrl ? (
-        <img src={item.thumbnailUrl} alt="" className="aspect-video w-full object-cover" loading="lazy" />
+        <CleanImage src={item.thumbnailUrl} alt="" className="aspect-video w-full object-cover" loading="lazy" />
       ) : (
         <div className="flex aspect-video w-full items-center justify-center bg-muted">
           {item.isLoading ? <Spinner className="size-6 text-muted-foreground" /> : <ImageIcon className="size-6 text-muted-foreground" />}
@@ -1332,7 +1334,7 @@ function ImageGenerateCard({ projects, onProjectCreated }: { projects: Project[]
                 <div key={img.imageEntId || i} className="overflow-hidden rounded-lg border bg-card">
                   {img.url ? (
                     <a href={img.url} target="_blank" rel="noopener noreferrer">
-                      <img
+                      <CleanImage
                         src={img.url}
                         alt={img.prompt || `variation ${i + 1}`}
                         className="aspect-square w-full object-cover transition-transform hover:scale-105"
@@ -1556,7 +1558,7 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
             <Label>Source image</Label>
             {sourceImageUrl ? (
               <div className="relative overflow-hidden rounded-lg border">
-                <img
+                <CleanImage
                   src={sourceImageUrl}
                   alt="Source image"
                   className="aspect-square w-full object-cover"
@@ -1622,7 +1624,7 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
                         title={img.prompt || 'Pick from library'}
                         className="overflow-hidden rounded-md border transition-all hover:ring-2 hover:ring-amber-500 disabled:opacity-50"
                       >
-                        <img
+                        <CleanImage
                           src={img.imageUrl || img.fullUrl || img.thumbnailUrl}
                           alt={img.prompt || ''}
                           className="aspect-square w-full object-cover"
@@ -1678,7 +1680,7 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
           ) : result.contentItem?.imageUrl ? (
             <div className="overflow-hidden rounded-lg border bg-card">
               <a href={result.contentItem.imageUrl} target="_blank" rel="noopener noreferrer">
-                <img
+                <CleanImage
                   src={result.contentItem.imageUrl}
                   alt={result.contentItem.prompt || 'Edited image'}
                   className="aspect-square w-full object-cover transition-transform hover:scale-105"
@@ -2148,7 +2150,7 @@ function FrameInput({
       <Label>{label}</Label>
       {imageUrl ? (
         <div className="relative overflow-hidden rounded-lg border">
-          <img src={imageUrl} alt={label} className="aspect-video w-full object-cover" />
+          <CleanImage src={imageUrl} alt={label} className="aspect-video w-full object-cover" />
           {onClear && (
             <Button
               variant="secondary"
@@ -2302,26 +2304,27 @@ function MediaSection() {
 
 function MediaCard({ item }: { item: MediaItem }) {
   const isVideo = item.type === 'video'
+  const cleanPoster = useCleanImage(item.thumbnailUrl)
   return (
     <Card className="overflow-hidden transition-shadow hover:shadow-md">
       {isVideo ? (
         item.videoUrl ? (
           <video
             src={item.videoUrl}
-            poster={item.thumbnailUrl}
+            poster={cleanPoster}
             controls
             playsInline
             className="aspect-square w-full bg-black object-contain"
           />
         ) : item.thumbnailUrl ? (
-          <img src={item.thumbnailUrl} alt="" className="aspect-square w-full object-cover" loading="lazy" />
+          <CleanImage src={item.thumbnailUrl} alt="" className="aspect-square w-full object-cover" loading="lazy" />
         ) : (
           <div className="flex aspect-square w-full items-center justify-center bg-muted">
             <Film className="size-8 text-muted-foreground" />
           </div>
         )
       ) : item.imageUrl || item.fullUrl || item.thumbnailUrl ? (
-        <img
+        <CleanImage
           src={item.imageUrl || item.fullUrl || item.thumbnailUrl}
           alt=""
           className="aspect-square w-full object-cover"
@@ -2347,7 +2350,7 @@ function MediaCard({ item }: { item: MediaItem }) {
             {item.type}
           </Badge>
           <a
-            href={`/api/vibes/media/${item.id}/download?type=${isVideo ? 'video' : 'image'}`}
+            href={`/api/vibes/media/${item.id}/download?type=${isVideo ? 'video' : 'image'}${isVideo ? '' : '&clean=true'}`}
             download
             className="ml-auto inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
             aria-label={`Download ${item.type}`}
