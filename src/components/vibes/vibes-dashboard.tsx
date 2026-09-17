@@ -30,6 +30,7 @@ import {
   Search,
   Sparkles,
   Sun,
+  Upload,
   Video,
   Volume2,
   Wand2,
@@ -543,6 +544,8 @@ function OverviewSection({
           {[
             { tab: 'generate', title: 'Generate a video', desc: 'Text → video with live polling', icon: Video, tint: 'violet' },
             { tab: 'generate', title: 'Generate an image', desc: 'Synchronous image variations', icon: ImageIcon, tint: 'rose' },
+            { tab: 'generate', title: 'Edit an image', desc: 'Prompt-driven edits to existing images', icon: Wand2, tint: 'amber' },
+            { tab: 'generate', title: 'Start / End frame video', desc: 'Keyframe interpolation (i2v)', icon: Film, tint: 'emerald' },
             { tab: 'projects', title: 'Manage projects', desc: 'Create, browse, inspect batches', icon: FolderKanban, tint: 'amber' },
             { tab: 'media', title: 'Media library', desc: 'All generated videos & images', icon: Film, tint: 'emerald' },
             { tab: 'voices', title: 'Text to speech', desc: '41 voices, instant synthesis', icon: AudioLines, tint: 'fuchsia' },
@@ -787,6 +790,8 @@ function GenerateSection({ projects, onProjectCreated }: { projects: Project[]; 
     <div className="space-y-8">
       <VideoGenerateCard projects={projects} onProjectCreated={onProjectCreated} />
       <ImageGenerateCard projects={projects} onProjectCreated={onProjectCreated} />
+      <ImageEditCard projects={projects} onProjectCreated={onProjectCreated} />
+      <StartEndFrameVideoCard projects={projects} onProjectCreated={onProjectCreated} />
     </div>
   )
 }
@@ -1355,8 +1360,807 @@ function ImageGenerateCard({ projects, onProjectCreated }: { projects: Project[]
 }
 
 // ========================================================================== //
-//  4. Media library tab
+//  3b. Image editing card — edit an existing image with a prompt
 // ========================================================================== //
+
+interface ImageEditResult {
+  success?: boolean
+  contentItem?: {
+    id?: string
+    imageUrl?: string
+    prompt?: string
+    imageEntId?: string
+  }
+}
+
+function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; onProjectCreated: (p: Project) => void }) {
+  const [sourceImageEntId, setSourceImageEntId] = useState('')
+  const [sourceImageUrl, setSourceImageUrl] = useState('')
+  const [editPrompt, setEditPrompt] = useState('')
+  const [projectId, setProjectId] = useState<string>(projects[0]?.id || '')
+  const [submitting, setSubmitting] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [result, setResult] = useState<ImageEditResult | null>(null)
+  const [imageLibrary, setImageLibrary] = useState<MediaItem[]>([])
+  const [loadingLibrary, setLoadingLibrary] = useState(false)
+  const fileInputRef = React.useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (!projectId && projects.length > 0) setProjectId(projects[0].id)
+  }, [projects, projectId])
+
+  // Fetch recent images from the media library for selection
+  useEffect(() => {
+    let active = true
+    setLoadingLibrary(true)
+    vibesFetch<MediaResponse>('/api/vibes/media?type=image&limit=12')
+      .then((d) => {
+        if (active) setImageLibrary(d.items || [])
+      })
+      .catch(() => {
+        // ignore — user can still upload manually
+      })
+      .finally(() => {
+        if (active) setLoadingLibrary(false)
+      })
+    return () => { active = false }
+  }, [result])
+
+  async function handleUploadFile(file: File) {
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please select an image file')
+      return
+    }
+    setUploading(true)
+    try {
+      // Read file as base64
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => {
+          const result = reader.result as string
+          // Strip the data: prefix
+          resolve(result.split(',')[1])
+        }
+        reader.onerror = reject
+        reader.readAsDataURL(file)
+      })
+      const res = await vibesFetch<{ mediaEntId?: string; imageUrl?: string }>('/api/vibes/upload/image', {
+        method: 'POST',
+        body: JSON.stringify({ image_base64: base64 }),
+      })
+      if (res.mediaEntId) {
+        setSourceImageEntId(res.mediaEntId)
+        setSourceImageUrl(res.imageUrl || '')
+        toast.success('Image uploaded — ready to edit')
+      } else {
+        throw new Error('Upload did not return a mediaEntId')
+      }
+    } catch (e: any) {
+      toast.error(e?.message || 'Failed to upload image')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  async function handleEdit() {
+    if (!sourceImageEntId) {
+      toast.error('Select or upload a source image first')
+      return
+    }
+    if (!editPrompt.trim()) {
+      toast.error('Edit prompt is required')
+      return
+    }
+    setSubmitting(true)
+    setResult(null)
+    try {
+      const res = await vibesFetch<ImageEditResult>('/api/vibes/images/edit', {
+        method: 'POST',
+        body: JSON.stringify({
+          source_image_ent_id: sourceImageEntId,
+          edit_prompt: editPrompt.trim(),
+          project_id: projectId || undefined,
+        }),
+      })
+      setResult(res)
+      if (res.success !== false) {
+        toast.success('Image edited successfully')
+      } else {
+        toast.error('Edit returned no result')
+      }
+    } catch (e: any) {
+      toast.error(e?.message || 'Failed to edit image')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Wand2 className="size-5 text-amber-500" aria-hidden /> Edit image
+        </CardTitle>
+        <CardDescription>
+          Edit an existing image with a text prompt — pick from your library or upload a new one,
+          then describe the change you want (e.g. “make it night time”, “add snow”).
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-6 lg:grid-cols-2">
+        {/* Form */}
+        <div className="space-y-4">
+          {/* Source image picker */}
+          <div className="space-y-2">
+            <Label>Source image</Label>
+            {sourceImageUrl ? (
+              <div className="relative overflow-hidden rounded-lg border">
+                <img
+                  src={sourceImageUrl}
+                  alt="Source image"
+                  className="aspect-square w-full object-cover"
+                />
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="absolute right-2 top-2"
+                  onClick={() => {
+                    setSourceImageEntId('')
+                    setSourceImageUrl('')
+                  }}
+                >
+                  <Plus className="size-3.5" /> Change
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {/* Upload dropzone */}
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploading}
+                  className="flex w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-amber-500/40 bg-amber-500/5 p-6 text-center text-sm text-muted-foreground transition-colors hover:border-amber-500/60 hover:bg-amber-500/10"
+                >
+                  {uploading ? (
+                    <Spinner className="size-6 text-amber-500" />
+                  ) : (
+                    <Upload className="size-6 text-amber-500" aria-hidden />
+                  )}
+                  <span>{uploading ? 'Uploading…' : 'Click to upload an image'}</span>
+                  <span className="text-xs">PNG, JPG up to 10MB</span>
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0]
+                    if (f) handleUploadFile(f)
+                    e.target.value = ''
+                  }}
+                />
+                {/* Or pick from library */}
+                <div className="text-center text-xs text-muted-foreground">— or pick from your library —</div>
+                <div className="grid grid-cols-4 gap-2">
+                  {loadingLibrary ? (
+                    Array.from({ length: 8 }).map((_, i) => (
+                      <Skeleton key={i} className="aspect-square rounded-md" />
+                    ))
+                  ) : imageLibrary.length === 0 ? (
+                    <p className="col-span-4 text-center text-xs text-muted-foreground py-2">
+                      No images in your library yet
+                    </p>
+                  ) : (
+                    imageLibrary.slice(0, 8).map((img) => (
+                      <button
+                        key={img.id}
+                        type="button"
+                        onClick={() => {
+                          // The media item has an id and imageUrl but we need the imageEntId
+                          // For media library items, the id is the content item id, and
+                          // we need the imageEntId from the item's data. However, the media
+                          // library endpoint returns imageUrl directly, so we can use the
+                          // item id as sourceImageEntId (vibes.ai accepts content item ids too).
+                          setSourceImageEntId(img.id)
+                          setSourceImageUrl(img.imageUrl || img.thumbnailUrl || '')
+                        }}
+                        className="overflow-hidden rounded-md border transition-all hover:ring-2 hover:ring-amber-500"
+                      >
+                        <img
+                          src={img.imageUrl || img.thumbnailUrl}
+                          alt={img.prompt || ''}
+                          className="aspect-square w-full object-cover"
+                          loading="lazy"
+                        />
+                      </button>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="edit-prompt">Edit prompt</Label>
+            <Textarea
+              id="edit-prompt"
+              placeholder="e.g. make it night time with a full moon, add falling snow"
+              value={editPrompt}
+              onChange={(e) => setEditPrompt(e.target.value)}
+              className="min-h-20"
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label>Project (optional)</Label>
+            <ProjectPicker
+              projects={projects}
+              value={projectId}
+              onChange={setProjectId}
+              onProjectCreated={onProjectCreated}
+            />
+          </div>
+
+          <Button
+            onClick={handleEdit}
+            disabled={submitting || !sourceImageEntId}
+            className="w-full bg-amber-600 text-white hover:bg-amber-700"
+            size="lg"
+          >
+            {submitting ? <Spinner className="size-4" /> : <Wand2 className="size-4" />}
+            {submitting ? 'Editing…' : 'Edit image'}
+          </Button>
+        </div>
+
+        {/* Result */}
+        <div className="space-y-3">
+          {!result ? (
+            <div className="flex h-full min-h-48 flex-col items-center justify-center gap-2 rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+              <Wand2 className="size-8 text-muted-foreground/50" aria-hidden />
+              <p>The edited image will appear here.</p>
+            </div>
+          ) : result.contentItem?.imageUrl ? (
+            <div className="overflow-hidden rounded-lg border bg-card">
+              <a href={result.contentItem.imageUrl} target="_blank" rel="noopener noreferrer">
+                <img
+                  src={result.contentItem.imageUrl}
+                  alt={result.contentItem.prompt || 'Edited image'}
+                  className="aspect-square w-full object-cover transition-transform hover:scale-105"
+                  loading="lazy"
+                />
+              </a>
+              <div className="flex items-center gap-2 p-2">
+                <Badge variant="secondary" className="text-[10px]">edited</Badge>
+                {result.contentItem.id && (
+                  <Badge variant="outline" className="font-mono text-[10px]">
+                    {result.contentItem.id.slice(0, 24)}
+                  </Badge>
+                )}
+                <a
+                  href={result.contentItem.imageUrl}
+                  download
+                  className="ml-auto inline-flex items-center gap-1 text-xs font-medium text-amber-600 hover:underline dark:text-amber-400"
+                >
+                  <Download className="size-3.5" /> Open
+                </a>
+              </div>
+            </div>
+          ) : (
+            <pre className="max-h-80 overflow-auto rounded-lg border bg-muted/40 p-3 text-[11px]">
+              {JSON.stringify(result, null, 2)}
+            </pre>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+// ========================================================================== //
+//  3c. Start / End frame video — image-to-video with keyframe interpolation
+// ========================================================================== //
+
+interface FrameHandle {
+  oil_handle?: string
+  image_url?: string
+  image_ent_id?: string
+  source?: string
+}
+
+function StartEndFrameVideoCard({ projects, onProjectCreated }: { projects: Project[]; onProjectCreated: (p: Project) => void }) {
+  const [prompt, setPrompt] = useState('')
+  const [aspect, setAspect] = useState<string>('16:9')
+  const [resolution, setResolution] = useState<string>('480p')
+  const [projectId, setProjectId] = useState<string>(projects[0]?.id || '')
+
+  const [startFrame, setStartFrame] = useState<FrameHandle | null>(null)
+  const [endFrame, setEndFrame] = useState<FrameHandle | null>(null)
+  const [startImageUrl, setStartImageUrl] = useState('')
+  const [endImageUrl, setEndImageUrl] = useState('')
+
+  const [submitting, setSubmitting] = useState(false)
+  const [polling, setPolling] = useState(false)
+  const [batch, setBatch] = useState<Batch | null>(null)
+
+  useEffect(() => {
+    if (!projectId && projects.length > 0) setProjectId(projects[0].id)
+  }, [projects, projectId])
+
+  // Upload an image file and return a frame handle
+  async function uploadImageFile(file: File): Promise<{ mediaEntId: string; imageUrl: string } | null> {
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please select an image file')
+      return null
+    }
+    const base64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => {
+        const result = reader.result as string
+        resolve(result.split(',')[1])
+      }
+      reader.onerror = reject
+      reader.readAsDataURL(file)
+    })
+    const res = await vibesFetch<{ mediaEntId?: string; imageUrl?: string }>('/api/vibes/upload/image', {
+      method: 'POST',
+      body: JSON.stringify({ image_base64: base64 }),
+    })
+    if (!res.mediaEntId) throw new Error('Upload did not return a mediaEntId')
+    return { mediaEntId: res.mediaEntId, imageUrl: res.imageUrl || '' }
+  }
+
+  // Generate an image from a prompt (synchronous) and return a frame handle
+  async function generateImageFromPrompt(genPrompt: string): Promise<{ mediaEntId: string; imageUrl: string } | null> {
+    if (!projectId) {
+      toast.error('Select or create a project first')
+      return null
+    }
+    const res = await vibesFetch<ImageGenResponse>('/api/vibes/images/generate', {
+      method: 'POST',
+      body: JSON.stringify({
+        project_id: projectId,
+        prompt: genPrompt,
+        aspect_ratio: aspect,
+        variations: 1,
+      }),
+    })
+    const firstImage = res.data?.[0]
+    if (!firstImage?.imageEntId) throw new Error('Image generation did not return an imageEntId')
+    return { mediaEntId: firstImage.imageEntId, imageUrl: firstImage.url || '' }
+  }
+
+  function buildHandle(upload: { mediaEntId: string; imageUrl: string }): FrameHandle {
+    return {
+      oil_handle: upload.mediaEntId,
+      image_url: upload.imageUrl,
+      image_ent_id: upload.mediaEntId,
+      source: 'upload',
+    }
+  }
+
+  async function handleUploadStart(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]
+    if (!f) return
+    try {
+      const up = await uploadImageFile(f)
+      if (up) {
+        setStartFrame(buildHandle(up))
+        setStartImageUrl(up.imageUrl)
+        toast.success('Start frame uploaded')
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to upload start frame')
+    }
+    e.target.value = ''
+  }
+
+  async function handleUploadEnd(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]
+    if (!f) return
+    try {
+      const up = await uploadImageFile(f)
+      if (up) {
+        setEndFrame(buildHandle(up))
+        setEndImageUrl(up.imageUrl)
+        toast.success('End frame uploaded')
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to upload end frame')
+    }
+    e.target.value = ''
+  }
+
+  async function handleGenerateStart(promptText: string) {
+    if (!promptText.trim()) {
+      toast.error('Enter a prompt for the start frame')
+      return
+    }
+    try {
+      const up = await generateImageFromPrompt(promptText.trim())
+      if (up) {
+        setStartFrame(buildHandle(up))
+        setStartImageUrl(up.imageUrl)
+        toast.success('Start frame generated')
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to generate start frame')
+    }
+  }
+
+  async function handleGenerateEnd(promptText: string) {
+    if (!promptText.trim()) {
+      toast.error('Enter a prompt for the end frame')
+      return
+    }
+    try {
+      const up = await generateImageFromPrompt(promptText.trim())
+      if (up) {
+        setEndFrame(buildHandle(up))
+        setEndImageUrl(up.imageUrl)
+        toast.success('End frame generated')
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to generate end frame')
+    }
+  }
+
+  async function handleGenerate() {
+    if (!prompt.trim()) {
+      toast.error('Video prompt is required')
+      return
+    }
+    if (!startFrame) {
+      toast.error('A start frame is required (upload or generate one)')
+      return
+    }
+    if (!projectId) {
+      toast.error('Select or create a project first')
+      return
+    }
+    setSubmitting(true)
+    setBatch(null)
+    try {
+      const res = await vibesFetch<VideoGenResponse>('/api/vibes/videos/generate', {
+        method: 'POST',
+        body: JSON.stringify({
+          project_id: projectId,
+          prompt: prompt.trim(),
+          aspect_ratio: aspect,
+          resolution,
+          variations: 1,
+          start_frame: startFrame,
+          ...(endFrame ? { end_frame: endFrame } : {}),
+          poll: false,
+        }),
+      })
+      const batchId = res.batchId || res.batch?.id || res.id
+      if (!batchId) throw new Error('No batchId returned from server')
+      setBatch({ id: batchId, isComplete: false, content: [], prompt: prompt.trim() })
+      toast.success(`Keyframe video started — batch ${batchId.slice(0, 18)}…`)
+    } catch (e: any) {
+      toast.error(e?.message || 'Failed to start keyframe video generation')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function handlePoll() {
+    if (!batch?.id) return
+    setPolling(true)
+    try {
+      const updated = await vibesFetch<Batch>(
+        `/api/vibes/batches/${batch.id}/poll?timeout=180`,
+        { method: 'POST' },
+      )
+      setBatch(updated)
+      if (updated.hasError) {
+        toast.error(updated.error || 'Batch failed')
+      } else if (updated.isComplete) {
+        toast.success('Keyframe video complete!')
+      } else {
+        toast.info('Still processing — click poll again to keep waiting')
+      }
+    } catch (e: any) {
+      toast.error(e?.message || 'Polling failed')
+    } finally {
+      setPolling(false)
+    }
+  }
+
+  const done = batch?.content?.filter((c) => c.videoUrl).length || 0
+  const total = batch?.content?.length || 0
+  const progress = total > 0 ? Math.round((done / total) * 100) : batch?.isComplete ? 100 : 0
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Film className="size-5 text-emerald-500" aria-hidden /> Start / End frame video
+        </CardTitle>
+        <CardDescription>
+          Generate a video that interpolates between two keyframe images (image-to-video).
+          Upload or generate a <strong>start frame</strong> (required), optionally add an
+          <strong> end frame</strong>, then describe the motion in the prompt.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-6 lg:grid-cols-2">
+        {/* Form */}
+        <div className="space-y-4">
+          {/* Start frame */}
+          <FrameInput
+            label="Start frame (required)"
+            imageUrl={startImageUrl}
+            onUpload={handleUploadStart}
+            onGenerate={handleGenerateStart}
+            accent="emerald"
+          />
+
+          {/* End frame */}
+          <FrameInput
+            label="End frame (optional)"
+            imageUrl={endImageUrl}
+            onUpload={handleUploadEnd}
+            onGenerate={handleGenerateEnd}
+            accent="fuchsia"
+            onClear={() => {
+              setEndFrame(null)
+              setEndImageUrl('')
+            }}
+          />
+
+          <div className="space-y-2">
+            <Label htmlFor="kfv-prompt">Video prompt</Label>
+            <Textarea
+              id="kfv-prompt"
+              placeholder="e.g. the rose slowly wilts, time-lapse effect, camera slowly pushes in"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              className="min-h-20"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label>Aspect ratio</Label>
+              <AspectPicker value={aspect} onChange={setAspect} />
+            </div>
+            <div className="space-y-2">
+              <Label>Resolution</Label>
+              <Select value={resolution} onValueChange={setResolution}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="480p">480p</SelectItem>
+                  <SelectItem value="720p">720p</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label>Project</Label>
+            <ProjectPicker
+              projects={projects}
+              value={projectId}
+              onChange={setProjectId}
+              onProjectCreated={onProjectCreated}
+            />
+          </div>
+
+          <Button
+            onClick={handleGenerate}
+            disabled={submitting || !startFrame}
+            className="w-full bg-emerald-600 text-white hover:bg-emerald-700"
+            size="lg"
+          >
+            {submitting ? <Spinner className="size-4" /> : <Film className="size-4" />}
+            {submitting ? 'Starting…' : 'Generate keyframe video'}
+          </Button>
+          {!startFrame && (
+            <p className="text-center text-xs text-muted-foreground">
+              Upload or generate a start frame to enable generation
+            </p>
+          )}
+        </div>
+
+        {/* Status / result */}
+        <div className="space-y-4">
+          {!batch ? (
+            <div className="flex h-full min-h-48 flex-col items-center justify-center gap-2 rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+              <Film className="size-8 text-muted-foreground/50" aria-hidden />
+              <p>Your keyframe video will appear here.</p>
+              <p className="text-xs">Set up frames + prompt, then generate.</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 p-3">
+                <Badge variant="outline" className="font-mono text-[11px]">
+                  {batch.id}
+                </Badge>
+                {batch.isComplete && (
+                  <Badge className="border-transparent bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                    <CheckCircle2 className="size-3" /> complete
+                  </Badge>
+                )}
+                {batch.hasError && (
+                  <Badge className="border-transparent bg-rose-500/15 text-rose-600 dark:text-rose-400">
+                    <AlertCircle className="size-3" /> error
+                  </Badge>
+                )}
+                {!batch.isComplete && !batch.hasError && (
+                  <Badge className="border-transparent bg-amber-500/15 text-amber-600 dark:text-amber-400">
+                    <Clock className="size-3" /> processing
+                  </Badge>
+                )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="ml-auto"
+                  onClick={handlePoll}
+                  disabled={polling || batch.isComplete}
+                >
+                  {polling ? <Spinner className="size-4" /> : <RefreshCw className="size-4" />}
+                  {polling ? 'Polling…' : 'Poll for completion'}
+                </Button>
+              </div>
+
+              {batch.prompt && (
+                <p className="rounded-md bg-muted/40 p-2 text-xs italic text-muted-foreground">
+                  &ldquo;{batch.prompt}&rdquo;
+                </p>
+              )}
+
+              {(total > 0 || batch.isComplete) && (
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs text-muted-foreground">
+                    <span>Progress</span>
+                    <span>{done}/{total} ready</span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full bg-gradient-to-r from-emerald-500 to-fuchsia-500 transition-all"
+                      style={{ width: `${progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {batch.hasError && batch.error && (
+                <div className="rounded-md border border-rose-500/30 bg-rose-500/5 p-3 text-xs text-rose-600 dark:text-rose-400">
+                  {batch.error}
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 gap-3">
+                {batch.content?.map((c) => (
+                  <VideoVariationCard key={c.id} item={c} />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+/** Reusable frame input component — upload a file or generate from a prompt. */
+function FrameInput({
+  label,
+  imageUrl,
+  onUpload,
+  onGenerate,
+  onClear,
+  accent,
+}: {
+  label: string
+  imageUrl: string
+  onUpload: (e: React.ChangeEvent<HTMLInputElement>) => void
+  onGenerate: (prompt: string) => Promise<void>
+  onClear?: () => void
+  accent: 'emerald' | 'fuchsia'
+}) {
+  const [showGen, setShowGen] = useState(false)
+  const [genPrompt, setGenPrompt] = useState('')
+  const [generating, setGenerating] = useState(false)
+  const fileRef = React.useRef<HTMLInputElement>(null)
+
+  const accentClasses = {
+    emerald: 'border-emerald-500/40 bg-emerald-500/5 hover:border-emerald-500/60 hover:bg-emerald-500/10 text-emerald-600',
+    fuchsia: 'border-fuchsia-500/40 bg-fuchsia-500/5 hover:border-fuchsia-500/60 hover:bg-fuchsia-500/10 text-fuchsia-600',
+  }[accent]
+
+  const accentBtn = {
+    emerald: 'bg-emerald-600 hover:bg-emerald-700',
+    fuchsia: 'bg-fuchsia-600 hover:bg-fuchsia-700',
+  }[accent]
+
+  async function handleGen() {
+    setGenerating(true)
+    try {
+      await onGenerate(genPrompt)
+      setShowGen(false)
+      setGenPrompt('')
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  return (
+    <div className="space-y-2">
+      <Label>{label}</Label>
+      {imageUrl ? (
+        <div className="relative overflow-hidden rounded-lg border">
+          <img src={imageUrl} alt={label} className="aspect-video w-full object-cover" />
+          {onClear && (
+            <Button
+              variant="secondary"
+              size="sm"
+              className="absolute right-2 top-2"
+              onClick={onClear}
+            >
+              <Plus className="size-3.5" /> Clear
+            </Button>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => fileRef.current?.click()}
+              className={cn(
+                'flex flex-1 items-center justify-center gap-2 rounded-lg border border-dashed p-3 text-sm transition-colors',
+                accentClasses,
+              )}
+            >
+              <Upload className="size-4" aria-hidden /> Upload
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowGen(!showGen)}
+              className={cn(
+                'flex flex-1 items-center justify-center gap-2 rounded-lg border border-dashed p-3 text-sm transition-colors',
+                accentClasses,
+              )}
+            >
+              <Sparkles className="size-4" aria-hidden /> Generate
+            </button>
+          </div>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={onUpload}
+          />
+          {showGen && (
+            <div className="flex gap-2">
+              <Input
+                placeholder="Describe the frame to generate…"
+                value={genPrompt}
+                onChange={(e) => setGenPrompt(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !generating) handleGen()
+                }}
+              />
+              <Button
+                size="sm"
+                className={cn('text-white', accentBtn)}
+                onClick={handleGen}
+                disabled={generating || !genPrompt.trim()}
+              >
+                {generating ? <Spinner className="size-4" /> : <Sparkles className="size-4" />}
+                {generating ? '…' : 'Go'}
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
 
 function MediaSection() {
   const [type, setType] = useState<string>('all')
