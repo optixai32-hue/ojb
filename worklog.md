@@ -148,3 +148,31 @@ Stage Summary:
 - All 6 tabs functional: Overview (health + stats + quick links), Projects (list + create dialog + per-project batches), Generate (async video gen with polling + synchronous image gen), Media (filterable/searchable grid + download), Voices & TTS (41 voices + working speech synthesis with audio playback), API Reference (all 33 endpoints, click-to-copy).
 - Sticky footer (mt-auto) + sticky header, semantic HTML, ARIA labels, ≥44px touch targets, framer-motion accents, sonner toasts, skeleton loaders, graceful error states with retry.
 - Ready for: end-user preview via the Preview Panel (Open in New Tab).
+
+---
+Task ID: 4
+Agent: main (Z.ai Code)
+Task: Fix "You do not have access to this image" error in the Image Edit feature
+
+Work Log:
+- Diagnosed the root cause: media library items return a content-item `id` (format `batch-xxx-content-N`), NOT the `imageEntId` that the `/api/generate/image-edit` endpoint requires
+- The `imageEntId` (a numeric string like `1359780897214025`) is stored inside the parent batch's content item `data` field as a JSON string: `{"imageEntId":"1359780897214025"}`
+- Updated `MediaItem` type to include `imageEntId`, `fullUrl`, `isFavorited` fields
+- Updated `BatchContentItem` type to include `data` (string|object) and `mediaEntId` fields
+- Added `resolveImageEntId()` helper in ImageEditCard that:
+  1. Takes a media library item
+  2. Fetches the parent batch via GET /api/vibes/batches/{batchId}
+  3. Finds the matching content item by id
+  4. Parses the `data` JSON string to extract `imageEntId`
+  5. Falls back to `mediaEntId` if `imageEntId` is absent
+- Added `handlePickFromLibrary()` that calls resolveImageEntId() and shows a loading spinner during the batch fetch
+- Updated the library picker button to call handlePickFromLibrary() instead of using the broken content-item id directly
+- Updated image display to use `fullUrl`/`thumbnailUrl` fallbacks (media library items have empty `imageUrl`)
+- Also fixed the Media library tab to use `fullUrl` for image display
+- Verified end-to-end: picked a library image → resolved imageEntId `1359780897214025` → POST /api/vibes/images/edit returned `{"success": true, "contentItem": {"imageUrl": "https://..."}}`
+
+Stage Summary:
+- Image Edit feature now works correctly for both upload and library-pick paths
+- The fix matches the Python client's `_extract_image_ent_id()` behavior (parse `data` JSON to get `imageEntId`)
+- Lint passes, no console errors, Agent Browser confirms the card renders
+- The edited image is returned with a new imageUrl and a `structuredOutput.editedFrom` field confirming the source imageEntId was used

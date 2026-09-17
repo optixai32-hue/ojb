@@ -94,7 +94,12 @@ interface MediaItem {
   videoUrl?: string
   imageUrl?: string
   prompt?: string
+  isFavorited?: boolean
   createdAt?: string
+  // imageEntId is NOT returned by /api/media-library directly — it lives
+  // inside the parent batch's content item `data` field (a JSON string).
+  // The dashboard fetches the batch on demand to extract it.
+  imageEntId?: string
 }
 interface MediaResponse {
   items: MediaItem[]
@@ -141,6 +146,10 @@ interface BatchContentItem {
   prompt?: string
   isLoading?: boolean
   hasError?: boolean
+  // vibes.ai returns this as a JSON string, e.g.
+  // '{"imageEntId":"12345","videoGenEntId":"67890",...}'
+  data?: string | Record<string, unknown>
+  mediaEntId?: string
 }
 interface Batch {
   id: string
@@ -1406,6 +1415,59 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
     return () => { active = false }
   }, [result])
 
+  // Media library items only have a content-item `id` (batch-xxx-content-N),
+  // not the `imageEntId` that the edit endpoint needs. Fetch the parent batch
+  // and extract imageEntId from the content item's `data` JSON field.
+  async function resolveImageEntId(item: MediaItem): Promise<string | null> {
+    // Already have it (e.g. from an uploaded image)
+    if (item.imageEntId) return item.imageEntId
+    if (!item.batchId) return null
+    try {
+      const batch = await vibesFetch<Batch>(`/api/vibes/batches/${item.batchId}`)
+      const content = batch.content ?? []
+      const match = content.find((c) => c.id === item.id) || content[0]
+      if (!match) return null
+      // The `data` field is a JSON string like {"imageEntId":"12345",...}
+      // It's not in our typed BatchContentItem, so access it loosely.
+      const raw = (match as any).data
+      if (typeof raw === 'string') {
+        try {
+          const parsed = JSON.parse(raw)
+          return parsed.imageEntId || parsed.image_ent_id || null
+        } catch {
+          return null
+        }
+      }
+      if (raw && typeof raw === 'object') {
+        return (raw as any).imageEntId || (raw as any).image_ent_id || null
+      }
+      // Some items expose mediaEntId directly
+      const mediaEntId = (match as any).mediaEntId
+      if (mediaEntId) return mediaEntId
+      return null
+    } catch {
+      return null
+    }
+  }
+
+  async function handlePickFromLibrary(img: MediaItem) {
+    setUploading(true)
+    try {
+      const imageEntId = await resolveImageEntId(img)
+      if (!imageEntId) {
+        toast.error('Could not resolve image entity ID from the library. Try uploading instead.')
+        return
+      }
+      setSourceImageEntId(imageEntId)
+      setSourceImageUrl(img.imageUrl || img.fullUrl || img.thumbnailUrl || '')
+      toast.success('Image selected from library')
+    } catch (e: any) {
+      toast.error(e?.message || 'Failed to load image details')
+    } finally {
+      setUploading(false)
+    }
+  }
+
   async function handleUploadFile(file: File) {
     if (!file.type.startsWith('image/')) {
       toast.error('Please select an image file')
@@ -1555,19 +1617,13 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
                       <button
                         key={img.id}
                         type="button"
-                        onClick={() => {
-                          // The media item has an id and imageUrl but we need the imageEntId
-                          // For media library items, the id is the content item id, and
-                          // we need the imageEntId from the item's data. However, the media
-                          // library endpoint returns imageUrl directly, so we can use the
-                          // item id as sourceImageEntId (vibes.ai accepts content item ids too).
-                          setSourceImageEntId(img.id)
-                          setSourceImageUrl(img.imageUrl || img.thumbnailUrl || '')
-                        }}
-                        className="overflow-hidden rounded-md border transition-all hover:ring-2 hover:ring-amber-500"
+                        disabled={uploading}
+                        onClick={() => handlePickFromLibrary(img)}
+                        title={img.prompt || 'Pick from library'}
+                        className="overflow-hidden rounded-md border transition-all hover:ring-2 hover:ring-amber-500 disabled:opacity-50"
                       >
                         <img
-                          src={img.imageUrl || img.thumbnailUrl}
+                          src={img.imageUrl || img.fullUrl || img.thumbnailUrl}
                           alt={img.prompt || ''}
                           className="aspect-square w-full object-cover"
                           loading="lazy"
@@ -2264,9 +2320,9 @@ function MediaCard({ item }: { item: MediaItem }) {
             <Film className="size-8 text-muted-foreground" />
           </div>
         )
-      ) : item.imageUrl || item.thumbnailUrl ? (
+      ) : item.imageUrl || item.fullUrl || item.thumbnailUrl ? (
         <img
-          src={item.imageUrl || item.thumbnailUrl}
+          src={item.imageUrl || item.fullUrl || item.thumbnailUrl}
           alt=""
           className="aspect-square w-full object-cover"
           loading="lazy"
