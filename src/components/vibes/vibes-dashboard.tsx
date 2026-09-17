@@ -1510,28 +1510,45 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
       toast.error('Please select an image file')
       return
     }
+    if (!projectId) {
+      toast.error('Select or create a project first — it is required to register the uploaded image for editing')
+      return
+    }
     setUploading(true)
     try {
-      // Read file as base64
-      const base64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader()
-        reader.onload = () => {
-          const result = reader.result as string
-          // Strip the data: prefix
-          resolve(result.split(',')[1])
-        }
-        reader.onerror = reject
-        reader.readAsDataURL(file)
-      })
-      const res = await vibesFetchWithRetry<{ mediaEntId?: string; imageUrl?: string }>('/api/vibes/upload/image', {
+      // Use the multipart upload-media endpoint which returns an uploadToken.
+      // The uploadToken is required to register the image as a content item
+      // in a project via /api/projects/{pid}/upload. Once registered, the
+      // mediaEntId becomes a valid sourceImageEntId for the edit endpoint.
+      //
+      // This is the REAL flow used by the Vibes.ai web UI:
+      //   1. POST /api/upload-media (multipart) → { mediaEntId, uploadToken, cdnUrl }
+      //   2. POST /api/projects/{pid}/upload (with uploadToken) → registers content item
+      //   3. POST /api/generate/image-edit (with mediaEntId) → edits the image
+      //
+      // The base64 /api/upload-image endpoint does NOT return an uploadToken,
+      // which is why direct editing of base64-uploaded images was impossible.
+      const formData = new FormData()
+      formData.set('file', file, file.name)
+      formData.set('filename', file.name)
+      formData.set('project_id', projectId)
+
+      const res = await fetch('/api/vibes/upload/media', {
         method: 'POST',
-        body: JSON.stringify({ image_base64: base64 }),
+        body: formData,
       })
-      if (res.mediaEntId) {
-        setSourceImageEntId(res.mediaEntId)
-        setSourceImageUrl(res.imageUrl || '')
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '')
+        let errMsg = `HTTP ${res.status}`
+        try { errMsg = JSON.parse(errText).error || errMsg } catch {}
+        throw new Error(errMsg)
+      }
+      const data = await res.json()
+      if (data.sourceImageEntId || data.mediaEntId) {
+        setSourceImageEntId(data.sourceImageEntId || data.mediaEntId)
+        setSourceImageUrl(data.imageUrl || '')
         setSourceType('upload')
-        toast.success('Image uploaded — ready to edit')
+        toast.success('Image uploaded and registered — ready to edit!')
       } else {
         throw new Error('Upload did not return a mediaEntId')
       }
@@ -1558,60 +1575,23 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
     setSubmitting(true)
     setResult(null)
     try {
-      if (sourceType === 'upload') {
-        // Uploaded images only have a mediaEntId, which vibes.ai's edit endpoint
-        // rejects with "You do not have access to this image". Instead, we
-        // generate a NEW image using the uploaded image as a STYLE reference
-        // ingredient — the result is a new image that combines the uploaded
-        // image's style with the edit prompt.
-        toast.info('Generating from your upload as a style reference…')
-        const res = await vibesFetchWithRetry<ImageGenResponse>('/api/vibes/images/generate', {
-          method: 'POST',
-          body: JSON.stringify({
-            project_id: projectId,
-            prompt: editPrompt.trim(),
-            aspect_ratio: '1:1',
-            variations: 1,
-            create_ingredients: [{
-              sourceImageEntId: sourceImageEntId,
-              ingredientType: 'STYLE',
-              name: 'Uploaded reference',
-              imageUrl: sourceImageUrl,
-            }],
-          }),
-        })
-        // Convert the generate response to the ImageEditResult shape
-        const firstImage = res.data?.[0]
-        if (firstImage) {
-          setResult({
-            success: true,
-            contentItem: {
-              id: firstImage.imageEntId,
-              imageUrl: firstImage.url,
-              prompt: firstImage.prompt,
-              imageEntId: firstImage.imageEntId,
-            },
-          })
-          toast.success('Image generated from your upload!')
-        } else {
-          toast.error('Generation returned no images')
-        }
+      // Both uploaded images (registered via upload-media + project upload)
+      // and library images (with real imageEntId) now use the SAME edit endpoint.
+      // The upload flow registers the image in a project, which makes the
+      // mediaEntId a valid sourceImageEntId for the edit endpoint.
+      const res = await vibesFetchWithRetry<ImageEditResult>('/api/vibes/images/edit', {
+        method: 'POST',
+        body: JSON.stringify({
+          source_image_ent_id: sourceImageEntId,
+          edit_prompt: editPrompt.trim(),
+          project_id: projectId || undefined,
+        }),
+      })
+      setResult(res)
+      if (res.success !== false) {
+        toast.success('Image edited successfully')
       } else {
-        // Library/generated images have a real imageEntId — use the edit endpoint directly.
-        const res = await vibesFetchWithRetry<ImageEditResult>('/api/vibes/images/edit', {
-          method: 'POST',
-          body: JSON.stringify({
-            source_image_ent_id: sourceImageEntId,
-            edit_prompt: editPrompt.trim(),
-            project_id: projectId || undefined,
-          }),
-        })
-        setResult(res)
-        if (res.success !== false) {
-          toast.success('Image edited successfully')
-        } else {
-          toast.error('Edit returned no result')
-        }
+        toast.error('Edit returned no result')
       }
     } catch (e: any) {
       toast.error(e?.message || 'Failed to edit image')
@@ -1630,8 +1610,8 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
           Edit an existing image with a text prompt — pick from your library or upload a new one,
           then describe the change you want (e.g. “make it night time”, “add snow”).
           {sourceType === 'upload' && (
-            <span className="mt-1 block text-xs text-amber-600 dark:text-amber-400">
-              ℹ️ Uploaded images are used as a style reference to generate a new image (vibes.ai doesn't support direct editing of uploads).
+            <span className="mt-1 block text-xs text-emerald-600 dark:text-emerald-400">
+              ✓ Uploaded image registered in project — direct editing is supported.
             </span>
           )}
           {sourceType === 'library' && sourceImageEntId && (
@@ -1763,10 +1743,7 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
             size="lg"
           >
             {submitting ? <Spinner className="size-4" /> : <Wand2 className="size-4" />}
-            {submitting
-              ? (sourceType === 'upload' ? 'Generating…' : 'Editing…')
-              : (sourceType === 'upload' ? 'Generate from upload' : 'Edit image')
-            }
+            {submitting ? 'Editing…' : 'Edit image'}
           </Button>
         </div>
 
@@ -1850,21 +1827,30 @@ function StartEndFrameVideoCard({ projects, onProjectCreated }: { projects: Proj
       toast.error('Please select an image file')
       return null
     }
-    const base64 = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = () => {
-        const result = reader.result as string
-        resolve(result.split(',')[1])
-      }
-      reader.onerror = reject
-      reader.readAsDataURL(file)
-    })
-    const res = await vibesFetchWithRetry<{ mediaEntId?: string; imageUrl?: string }>('/api/vibes/upload/image', {
+    if (!projectId) {
+      toast.error('Select or create a project first')
+      return null
+    }
+    // Use the multipart upload-media endpoint which returns an uploadToken
+    // and registers the image in the project, making it valid for i2v generation.
+    const formData = new FormData()
+    formData.set('file', file, file.name)
+    formData.set('filename', file.name)
+    formData.set('project_id', projectId)
+
+    const res = await fetch('/api/vibes/upload/media', {
       method: 'POST',
-      body: JSON.stringify({ image_base64: base64 }),
+      body: formData,
     })
-    if (!res.mediaEntId) throw new Error('Upload did not return a mediaEntId')
-    return { mediaEntId: res.mediaEntId, imageUrl: res.imageUrl || '' }
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '')
+      let errMsg = `HTTP ${res.status}`
+      try { errMsg = JSON.parse(errText).error || errMsg } catch {}
+      throw new Error(errMsg)
+    }
+    const data = await res.json()
+    if (!data.mediaEntId) throw new Error('Upload did not return a mediaEntId')
+    return { mediaEntId: data.mediaEntId, imageUrl: data.imageUrl || '' }
   }
 
   // Generate an image from a prompt (synchronous) and return a frame handle

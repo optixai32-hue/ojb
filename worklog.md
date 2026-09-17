@@ -289,3 +289,43 @@ Stage Summary:
 - No more "You do not have access to this image" error
 - The UX clearly communicates which mode is active via colored messages and dynamic button text
 - Lint passes (0 errors)
+
+---
+Task ID: 8
+Agent: main (Z.ai Code)
+Task: Find the REAL solution for editing uploaded images (not a workaround)
+
+Work Log:
+- Did proper research by inspecting the VibesAI reversing notes and testing endpoints directly
+- Discovered the key difference between two upload endpoints:
+  - POST /api/upload-image (base64 JSON) → returns {mediaEntId, imageUrl} — NO uploadToken
+  - POST /api/upload-media (multipart form) → returns {mediaEntId, cdnUrl, dimensions, aspectRatio, uploadToken} — HAS uploadToken
+- The uploadToken is the missing piece! It's required to register the uploaded image as a content item in a project via POST /api/projects/{pid}/upload
+- Once registered in a project, the original mediaEntId becomes a valid sourceImageEntId for POST /api/generate/image-edit
+- Verified the full flow directly against vibes.ai:
+  1. POST /api/upload-media (multipart) → {mediaEntId, uploadToken, cdnUrl}
+  2. POST /api/projects/{pid}/upload with {mediaEntId, uploadToken, cdnUrl, filename} → {success, contentItems}
+  3. POST /api/generate/image-edit with {sourceImageEntId: mediaEntId, editPrompt, projectId} → SUCCESS!
+- Created POST /api/vibes/upload/media route that:
+  - Receives multipart form data from the browser (file + filename + project_id)
+  - Forwards to vibes.ai /api/upload-media (multipart) → gets uploadToken
+  - Calls bulkUploadToProject to register the image in the project
+  - Returns {mediaEntId, imageUrl, sourceImageEntId, registered: true}
+- Updated ImageEditCard:
+  - handleUploadFile now uses /api/vibes/upload/media (multipart) instead of /api/vibes/upload/image (base64)
+  - Requires a project to be selected before upload (needed for registration)
+  - handleEdit now uses the SAME edit endpoint for both uploaded and library images (no more branching)
+  - Reverted the "style ingredient" workaround — the edit is now a REAL direct edit
+  - Updated button text: just "Edit image" for both paths
+  - Updated help messages: both paths show ✓ "direct editing is supported"
+- Updated StartEndFrameVideoCard:
+  - uploadImageFile now uses /api/vibes/upload/media (multipart) too
+  - This fixes the same issue for the Start/End frame feature
+
+Stage Summary:
+- The REAL solution: use /api/upload-media (multipart) instead of /api/upload-image (base64)
+- The multipart endpoint returns an uploadToken which is the key to registering the image for editing
+- After registration, the mediaEntId IS a valid sourceImageEntId — no conversion needed
+- Verified end-to-end: upload (5s) → edit (7.7s) → SUCCESS, server stays alive
+- No more "You do not have access to this image" error
+- No workaround — this is the exact flow the Vibes.ai web UI uses
