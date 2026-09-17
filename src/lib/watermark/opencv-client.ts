@@ -19,10 +19,9 @@ declare global {
   }
 }
 
+import { detectSparkle } from './detect-sparkle';
+
 const OPENCV_URL = '/opencv.js';
-const WATERMARK_WIDTH_FRAC = 0.10;   // 10% of image width
-const WATERMARK_HEIGHT_FRAC = 0.10;  // 10% of image height
-const WATERMARK_INSET = 0.01;        // 1% inset from edge
 const INPAINT_RADIUS = 5;            // inpainting radius (px)
 
 let cvPromise: Promise<any> | null = null;
@@ -119,6 +118,10 @@ async function fetchImageAsBlobUrl(imageUrl: string): Promise<string> {
 /**
  * Remove the Meta AI watermark from an image using OpenCV.js inpainting.
  *
+ * Uses auto-detection to find the exact sparkle location (not a fixed
+ * rectangle), so only the watermark pixels are inpainted — the surrounding
+ * image content is preserved without cutting.
+ *
  * @param imageUrl - The source image URL (CDN or relative)
  * @returns A blob URL of the cleaned image, or the original URL on failure
  */
@@ -145,28 +148,38 @@ export async function removeWatermarkWithOpenCV(
     const h = img.naturalHeight;
     if (w < 64 || h < 64) return imageUrl;
 
-    // 3. Draw the image to a canvas
+    // 4. Draw the image to a canvas
     const canvas = document.createElement('canvas');
     canvas.width = w;
     canvas.height = h;
     const ctx = canvas.getContext('2d')!;
     ctx.drawImage(img, 0, 0);
 
-    // 4. Create the watermark mask (white = areas to inpaint)
-    const wmW = Math.round(w * WATERMARK_WIDTH_FRAC);
-    const wmH = Math.round(h * WATERMARK_HEIGHT_FRAC);
-    const inset = Math.round(Math.min(w, h) * WATERMARK_INSET);
-    const wmX = Math.max(0, w - wmW - inset);
-    const wmY = Math.max(0, h - wmH - inset);
+    // 5. Auto-detect the sparkle watermark (only the sparkle pixels, not a rectangle)
+    const detected = detectSparkle(canvas);
 
-    const maskCanvas = document.createElement('canvas');
-    maskCanvas.width = w;
-    maskCanvas.height = h;
-    const maskCtx = maskCanvas.getContext('2d')!;
-    maskCtx.fillStyle = '#000000';
-    maskCtx.fillRect(0, 0, w, h);
-    maskCtx.fillStyle = '#ffffff';
-    maskCtx.fillRect(wmX, wmY, wmW, wmH);
+    let maskCanvas: HTMLCanvasElement;
+
+    if (detected) {
+      // Use the precise mask from auto-detection — only covers the sparkle
+      maskCanvas = detected.mask;
+    } else {
+      // Fallback: small fixed rectangle in the bottom-right corner
+      const wmW = Math.round(w * 0.06);
+      const wmH = Math.round(h * 0.06);
+      const inset = Math.round(Math.min(w, h) * 0.01);
+      const wmX = Math.max(0, w - wmW - inset);
+      const wmY = Math.max(0, h - wmH - inset);
+
+      maskCanvas = document.createElement('canvas');
+      maskCanvas.width = w;
+      maskCanvas.height = h;
+      const maskCtx = maskCanvas.getContext('2d')!;
+      maskCtx.fillStyle = '#000000';
+      maskCtx.fillRect(0, 0, w, h);
+      maskCtx.fillStyle = '#ffffff';
+      maskCtx.fillRect(wmX, wmY, wmW, wmH);
+    }
 
     // 5. Convert canvas images to OpenCV Mats
     const srcMat = cv.imread(canvas);

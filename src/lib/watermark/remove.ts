@@ -23,12 +23,13 @@
 import sharp from "sharp";
 
 // The Meta AI watermark sits in the bottom-right corner.
-// It's a small sparkle icon, roughly 6-9% of the image's dimensions.
-const WATERMARK_WIDTH_FRAC = 0.10; // 10% of image width
-const WATERMARK_HEIGHT_FRAC = 0.10; // 10% of image height
-const WATERMARK_INSET = 0.01; // 1% inset from the very edge
-const FEATHER = 0.35; // feather width as fraction of watermark size
-const SOURCE_OFFSET = 0.03; // how far left of watermark to sample from
+// It's a small sparkle icon, roughly 5% of the image's dimensions (not 10%).
+// We use a smaller, tighter mask to avoid cutting too much image content.
+const WATERMARK_WIDTH_FRAC = 0.06;   // 6% of image width (was 10%)
+const WATERMARK_HEIGHT_FRAC = 0.06;  // 6% of image height (was 10%)
+const WATERMARK_INSET = 0.008;       // 0.8% inset from the very edge
+const FEATHER = 0.35;               // feather width as fraction of watermark size
+const SOURCE_OFFSET = 0.03;          // how far left of watermark to sample from
 
 /**
  * Remove the Meta AI watermark from an image buffer.
