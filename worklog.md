@@ -329,3 +329,44 @@ Stage Summary:
 - Verified end-to-end: upload (5s) → edit (7.7s) → SUCCESS, server stays alive
 - No more "You do not have access to this image" error
 - No workaround — this is the exact flow the Vibes.ai web UI uses
+
+---
+Task ID: 9
+Agent: main (Z.ai Code)
+Task: Add Image to Video (animate image) feature
+
+Work Log:
+- Identified that the dashboard was missing the "Image to Video" (i2v animate) feature
+- This is different from Start/End frame: animateImage takes a single image and animates it
+  (using sourceContentItemIds), while generateVideo(start_frame) uses directPromptImageHandle
+- The animateImage method already existed in the TypeScript client (src/lib/vibes/client.ts)
+- Created POST /api/vibes/videos/animate API route:
+  - Takes {project_id, batch_id, content_id?, prompt?, poll?}
+  - Fetches the batch to get the full source image content item
+  - Calls client.animateImage() with the source image
+  - Returns the generation response with batchId for polling
+- Created ImageToVideoCard UI component (cyan theme):
+  - Source image picker: upload (via /api/vibes/upload/media) or pick from library
+  - Motion directive textarea (optional — empty = auto animate)
+  - Project picker
+  - "Auto animate" / "Animate with directive" button (changes based on prompt)
+  - Batch status + progress bar + video result display (reuses VideoVariationCard)
+  - Polling support (same pattern as VideoGenerateCard)
+- Added to GenerateSection (between ImageEditCard and StartEndFrameVideoCard)
+- Added "Image to video" quick action on the Overview tab
+- Tested end-to-end:
+  - Generated an image → animated it → batchId: image2video-1789676377117-ac0e04f4 → SUCCESS
+  - POST /api/vibes/videos/animate 200 in 10.7s
+  - Server stays alive
+
+Stage Summary:
+- Image to Video feature is now complete
+- Two modes: auto animate (no prompt, uses image's original prompt) and manual animate (with directive)
+- Uses the real vibes.ai animate flow (sourceContentItemIds + midjen-short model + generationType: "i2v")
+- Dashboard Generate tab now has 5 cards:
+  1. Generate video (t2v) - violet
+  2. Generate image (t2i) - rose
+  3. Edit image - amber
+  4. Image to video (i2v animate) - cyan [NEW]
+  5. Start/End frame video (i2v keyframes) - emerald
+- Lint passes (0 errors)

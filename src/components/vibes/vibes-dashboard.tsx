@@ -582,6 +582,7 @@ function OverviewSection({
             { tab: 'generate', title: 'Generate a video', desc: 'Text → video with live polling', icon: Video, tint: 'violet' },
             { tab: 'generate', title: 'Generate an image', desc: 'Synchronous image variations', icon: ImageIcon, tint: 'rose' },
             { tab: 'generate', title: 'Edit an image', desc: 'Prompt-driven edits to existing images', icon: Wand2, tint: 'amber' },
+            { tab: 'generate', title: 'Image to video', desc: 'Animate a still image (i2v)', icon: Film, tint: 'cyan' },
             { tab: 'generate', title: 'Start / End frame video', desc: 'Keyframe interpolation (i2v)', icon: Film, tint: 'emerald' },
             { tab: 'projects', title: 'Manage projects', desc: 'Create, browse, inspect batches', icon: FolderKanban, tint: 'amber' },
             { tab: 'media', title: 'Media library', desc: 'All generated videos & images', icon: Film, tint: 'emerald' },
@@ -828,6 +829,7 @@ function GenerateSection({ projects, onProjectCreated }: { projects: Project[]; 
       <VideoGenerateCard projects={projects} onProjectCreated={onProjectCreated} />
       <ImageGenerateCard projects={projects} onProjectCreated={onProjectCreated} />
       <ImageEditCard projects={projects} onProjectCreated={onProjectCreated} />
+      <ImageToVideoCard projects={projects} onProjectCreated={onProjectCreated} />
       <StartEndFrameVideoCard projects={projects} onProjectCreated={onProjectCreated} />
     </div>
   )
@@ -1784,6 +1786,389 @@ function ImageEditCard({ projects, onProjectCreated }: { projects: Project[]; on
             <pre className="max-h-80 overflow-auto rounded-lg border bg-muted/40 p-3 text-[11px]">
               {JSON.stringify(result, null, 2)}
             </pre>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+// ========================================================================== //
+//  3b2. Image to Video — animate a still image into a video (i2v)
+// ========================================================================== //
+
+function ImageToVideoCard({ projects, onProjectCreated }: { projects: Project[]; onProjectCreated: (p: Project) => void }) {
+  const [projectId, setProjectId] = useState<string>(projects[0]?.id || '')
+  const [sourceImageUrl, setSourceImageUrl] = useState('')
+  const [sourceBatchId, setSourceBatchId] = useState('')
+  const [sourceContentId, setSourceContentId] = useState('')
+  const [animatePrompt, setAnimatePrompt] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [polling, setPolling] = useState(false)
+  const [batch, setBatch] = useState<Batch | null>(null)
+  const [imageLibrary, setImageLibrary] = useState<MediaItem[]>([])
+  const [loadingLibrary, setLoadingLibrary] = useState(false)
+
+  useEffect(() => {
+    if (!projectId && projects.length > 0) setProjectId(projects[0].id)
+  }, [projects, projectId])
+
+  // Fetch recent images from the media library
+  useEffect(() => {
+    let active = true
+    setLoadingLibrary(true)
+    vibesFetch<MediaResponse>('/api/vibes/media?type=image&limit=12')
+      .then((d) => { if (active) setImageLibrary(d.items || []) })
+      .catch(() => {})
+      .finally(() => { if (active) setLoadingLibrary(false) })
+    return () => { active = false }
+  }, [batch])
+
+  async function handlePickFromLibrary(img: MediaItem) {
+    if (!img.batchId) {
+      toast.error('This image does not have a batch ID — cannot animate')
+      return
+    }
+    setSourceBatchId(img.batchId)
+    setSourceContentId(img.id)
+    setSourceImageUrl(img.imageUrl || img.fullUrl || img.thumbnailUrl || '')
+    toast.success('Image selected — ready to animate')
+  }
+
+  async function handleUploadFile(file: File) {
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please select an image file')
+      return
+    }
+    if (!projectId) {
+      toast.error('Select or create a project first')
+      return
+    }
+    setSubmitting(true)
+    try {
+      const formData = new FormData()
+      formData.set('file', file, file.name)
+      formData.set('filename', file.name)
+      formData.set('project_id', projectId)
+
+      const res = await fetch('/api/vibes/upload/media', { method: 'POST', body: formData })
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '')
+        let errMsg = `HTTP ${res.status}`
+        try { errMsg = JSON.parse(errText).error || errMsg } catch {}
+        throw new Error(errMsg)
+      }
+      const data = await res.json()
+      // After upload + register, the image is in a new batch.
+      // We need to find that batch to get the content item for animating.
+      // List the project's batches to find the most recent one.
+      const batchesResp = await vibesFetch<{ batches?: string[] }>(
+        `/api/vibes/batches?limit=5&project_id=${projectId}`,
+      )
+      const batchIds = batchesResp.batches ?? []
+      // Find the batch that contains our uploaded image
+      let foundBatchId = ''
+      let foundContentId = ''
+      for (const bid of batchIds) {
+        try {
+          const b = await vibesFetch<Batch>(`/api/vibes/batches/${bid}`)
+          const content = b.content ?? []
+          const match = content.find((c) => c.imageUrl === data.imageUrl || c.id === data.contentItemId)
+          if (match) {
+            foundBatchId = bid
+            foundContentId = match.id
+            break
+          }
+        } catch { /* skip */ }
+      }
+      if (!foundBatchId) {
+        // Fallback: use the data we have
+        foundBatchId = data.contentItemId || ''
+        foundContentId = data.contentItemId || ''
+      }
+      setSourceBatchId(foundBatchId)
+      setSourceContentId(foundContentId)
+      setSourceImageUrl(data.imageUrl || '')
+      toast.success('Image uploaded — ready to animate')
+    } catch (e: any) {
+      toast.error(e?.message || 'Failed to upload image')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function handleAnimate() {
+    if (!sourceBatchId) {
+      toast.error('Select or upload a source image first')
+      return
+    }
+    if (!projectId) {
+      toast.error('Select or create a project first')
+      return
+    }
+    setSubmitting(true)
+    setBatch(null)
+    try {
+      const res = await vibesFetchWithRetry<VideoGenResponse>('/api/vibes/videos/animate', {
+        method: 'POST',
+        body: JSON.stringify({
+          project_id: projectId,
+          batch_id: sourceBatchId,
+          content_id: sourceContentId || undefined,
+          prompt: animatePrompt.trim() || undefined,
+          poll: false,
+        }),
+      })
+      const batchId = res.batchId || res.batch?.id || res.id
+      if (!batchId) throw new Error('No batchId returned from animate call')
+      setBatch({
+        id: batchId,
+        isComplete: false,
+        content: [],
+        prompt: animatePrompt.trim() || 'Auto animate',
+      })
+      toast.success(`Animation started — batch ${batchId.slice(0, 18)}…`)
+    } catch (e: any) {
+      toast.error(e?.message || 'Failed to start animation')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function handlePoll() {
+    if (!batch?.id) return
+    setPolling(true)
+    try {
+      const updated = await vibesFetch<Batch>(
+        `/api/vibes/batches/${batch.id}/poll?timeout=180`,
+        { method: 'POST' },
+      )
+      setBatch(updated)
+      if (updated.hasError) {
+        toast.error(updated.error || 'Animation failed')
+      } else if (updated.isComplete) {
+        toast.success('Animation complete!')
+      } else {
+        toast.info('Still processing — click poll again to keep waiting')
+      }
+    } catch (e: any) {
+      toast.error(e?.message || 'Polling failed')
+    } finally {
+      setPolling(false)
+    }
+  }
+
+  const done = batch?.content?.filter((c) => c.videoUrl).length || 0
+  const total = batch?.content?.length || 0
+  const progress = total > 0 ? Math.round((done / total) * 100) : batch?.isComplete ? 100 : 0
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Film className="size-5 text-cyan-500" aria-hidden /> Image to video
+        </CardTitle>
+        <CardDescription>
+          Animate a still image into a ~5 second video (image-to-video). Pick from your library or
+          upload a new image, optionally add a motion directive, then animate.
+          {sourceBatchId && (
+            <span className="mt-1 block text-xs text-emerald-600 dark:text-emerald-400">
+              ✓ Image selected — ready to animate.
+            </span>
+          )}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-6 lg:grid-cols-2">
+        {/* Form */}
+        <div className="space-y-4">
+          {/* Source image picker */}
+          <div className="space-y-2">
+            <Label>Source image</Label>
+            {sourceImageUrl ? (
+              <div className="relative overflow-hidden rounded-lg border">
+                <CleanImage src={sourceImageUrl} alt="Source image" className="aspect-video w-full object-cover" />
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="absolute right-2 top-2"
+                  onClick={() => {
+                    setSourceImageUrl('')
+                    setSourceBatchId('')
+                    setSourceContentId('')
+                  }}
+                >
+                  <Plus className="size-3.5" /> Change
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {/* Upload dropzone */}
+                <label className="flex w-full cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-cyan-500/40 bg-cyan-500/5 p-6 text-center text-sm text-muted-foreground transition-colors hover:border-cyan-500/60 hover:bg-cyan-500/10">
+                  {submitting ? (
+                    <Spinner className="size-6 text-cyan-500" />
+                  ) : (
+                    <Upload className="size-6 text-cyan-500" aria-hidden />
+                  )}
+                  <span>{submitting ? 'Uploading…' : 'Click to upload an image'}</span>
+                  <span className="text-xs">PNG, JPG up to 10MB</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0]
+                      if (f) handleUploadFile(f)
+                      e.target.value = ''
+                    }}
+                  />
+                </label>
+                {/* Or pick from library */}
+                <div className="text-center text-xs text-muted-foreground">— or pick from your library —</div>
+                <div className="grid grid-cols-4 gap-2">
+                  {loadingLibrary ? (
+                    Array.from({ length: 8 }).map((_, i) => (
+                      <Skeleton key={i} className="aspect-square rounded-md" />
+                    ))
+                  ) : imageLibrary.length === 0 ? (
+                    <p className="col-span-4 text-center text-xs text-muted-foreground py-2">
+                      No images in your library yet
+                    </p>
+                  ) : (
+                    imageLibrary.slice(0, 8).map((img) => (
+                      <button
+                        key={img.id}
+                        type="button"
+                        disabled={submitting}
+                        onClick={() => handlePickFromLibrary(img)}
+                        title={img.prompt || 'Pick from library'}
+                        className="overflow-hidden rounded-md border transition-all hover:ring-2 hover:ring-cyan-500 disabled:opacity-50"
+                      >
+                        <CleanImage
+                          src={img.imageUrl || img.fullUrl || img.thumbnailUrl}
+                          alt={img.prompt || ''}
+                          className="aspect-square w-full object-cover"
+                          loading="lazy"
+                        />
+                      </button>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="anim-prompt">Motion directive (optional)</Label>
+            <Textarea
+              id="anim-prompt"
+              placeholder="e.g. camera slowly zooms in, gentle sway in the wind, waves crashing
+              (leave empty for auto-animate — uses the image's original prompt)"
+              value={animatePrompt}
+              onChange={(e) => setAnimatePrompt(e.target.value)}
+              className="min-h-20"
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label>Project</Label>
+            <ProjectPicker
+              projects={projects}
+              value={projectId}
+              onChange={setProjectId}
+              onProjectCreated={onProjectCreated}
+            />
+          </div>
+
+          <Button
+            onClick={handleAnimate}
+            disabled={submitting || !sourceBatchId}
+            className="w-full bg-cyan-600 text-white hover:bg-cyan-700"
+            size="lg"
+          >
+            {submitting ? <Spinner className="size-4" /> : <Film className="size-4" />}
+            {submitting ? 'Starting…' : animatePrompt.trim() ? 'Animate with directive' : 'Auto animate'}
+          </Button>
+          {!sourceBatchId && (
+            <p className="text-center text-xs text-muted-foreground">
+              Select or upload an image to enable animation
+            </p>
+          )}
+        </div>
+
+        {/* Status / result */}
+        <div className="space-y-4">
+          {!batch ? (
+            <div className="flex h-full min-h-48 flex-col items-center justify-center gap-2 rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+              <Film className="size-8 text-muted-foreground/50" aria-hidden />
+              <p>Your animated video will appear here.</p>
+              <p className="text-xs">Pick an image, optionally add a directive, then animate.</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 p-3">
+                <Badge variant="outline" className="font-mono text-[11px]">
+                  {batch.id}
+                </Badge>
+                {batch.isComplete && (
+                  <Badge className="border-transparent bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                    <CheckCircle2 className="size-3" /> complete
+                  </Badge>
+                )}
+                {batch.hasError && (
+                  <Badge className="border-transparent bg-rose-500/15 text-rose-600 dark:text-rose-400">
+                    <AlertCircle className="size-3" /> error
+                  </Badge>
+                )}
+                {!batch.isComplete && !batch.hasError && (
+                  <Badge className="border-transparent bg-amber-500/15 text-amber-600 dark:text-amber-400">
+                    <Clock className="size-3" /> processing
+                  </Badge>
+                )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="ml-auto"
+                  onClick={handlePoll}
+                  disabled={polling || batch.isComplete}
+                >
+                  {polling ? <Spinner className="size-4" /> : <RefreshCw className="size-4" />}
+                  {polling ? 'Polling…' : 'Poll for completion'}
+                </Button>
+              </div>
+
+              {batch.prompt && (
+                <p className="rounded-md bg-muted/40 p-2 text-xs italic text-muted-foreground">
+                  &ldquo;{batch.prompt}&rdquo;
+                </p>
+              )}
+
+              {(total > 0 || batch.isComplete) && (
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs text-muted-foreground">
+                    <span>Progress</span>
+                    <span>{done}/{total} ready</span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 transition-all"
+                      style={{ width: `${progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {batch.hasError && batch.error && (
+                <div className="rounded-md border border-rose-500/30 bg-rose-500/5 p-3 text-xs text-rose-600 dark:text-rose-400">
+                  {batch.error}
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 gap-3">
+                {batch.content?.map((c) => (
+                  <VideoVariationCard key={c.id} item={c} />
+                ))}
+              </div>
+            </div>
           )}
         </div>
       </CardContent>
