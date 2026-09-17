@@ -1,0 +1,702 @@
+  1707→                import json as _json
+  1708→                data = _json.loads(data)
+  1709→            except ValueError:
+  1710→                data = {}
+  1711→        if isinstance(data, dict):
+  1712→            return data.get("videoGenEntId") or data.get("videoEntId")
+  1713→        return None
+  1714→
+  1715→    @staticmethod
+  1716→    def _extract_image_ent_id(content_item: dict) -> Optional[str]:
+  1717→        """Extract ``imageEntId`` from a content item."""
+  1718→        data = content_item.get("data")
+  1719→        if isinstance(data, str):
+  1720→            try:
+  1721→                import json as _json
+  1722→                data = _json.loads(data)
+  1723→            except ValueError:
+  1724→                data = {}
+  1725→        if isinstance(data, dict):
+  1726→            return data.get("imageEntId") or data.get("image_ent_id")
+  1727→        return None
+  1728→
+  1729→    # ------------------------------------------------------------------ #
+  1730→    #  FRAME HANDLE BUILDER (for start/end frame uploads)
+  1731→    # ------------------------------------------------------------------ #
+  1732→    @staticmethod
+  1733→    def build_frame_handle(
+  1734→        upload_response: dict,
+  1735→        source: str = "upload",
+  1736→    ) -> dict:
+  1737→        """Build a frame handle dict from an ``upload_image()`` response.
+  1738→
+  1739→        Use this to construct the ``start_frame`` / ``end_frame`` arguments
+  1740→        for ``generate_video()``.
+  1741→
+  1742→        Parameters
+  1743→        ----------
+  1744→        upload_response : dict
+  1745→            The response from ``client.upload_image()`` or
+  1746→            ``client.upload_image_file()``. Contains ``mediaEntId`` and
+  1747→            ``imageUrl``.
+  1748→        source : str
+  1749→            "upload" (default), "asset", or "selection".
+  1750→
+  1751→        Returns
+  1752→        -------
+  1753→        dict
+  1754→            ``{"oil_handle": ..., "image_url": ..., "image_ent_id": ..., "source": ...}``
+  1755→        """
+  1756→        return {
+  1757→            "oil_handle": upload_response.get("imageHandle") or upload_response.get("oil_handle"),
+  1758→            "image_url": upload_response.get("imageUrl") or upload_response.get("image_url"),
+  1759→            "image_ent_id": upload_response.get("mediaEntId") or upload_response.get("image_ent_id"),
+  1760→            "source": source,
+  1761→        }
+  1762→
+  1763→    # ------------------------------------------------------------------ #
+  1764→    #  PROMPT ENHANCEMENT
+  1765→    # ------------------------------------------------------------------ #
+  1766→    def enhance_prompt(
+  1767→        self,
+  1768→        prompt: str,
+  1769→        *,
+  1770→        project_id: Optional[str] = None,
+  1771→        batch_type: str = "videos",
+  1772→        image_model: Union[str, ImageModel] = ImageModel.BASE,
+  1773→        video_model: Union[str, VideoModel] = VideoModel.SHORT,
+  1774→        prompt_model: Union[str, PromptModel] = PromptModel.GEMINI_FLASH,
+  1775→        resolution: Union[str, Resolution] = Resolution.P480,
+  1776→        aspect_ratio: Union[str, AspectRatio] = AspectRatio.PORTRAIT,
+  1777→        system_prompt: str = "",
+  1778→    ) -> List[dict]:
+  1779→        """Generate 4 AI-enhanced prompt variations from a short seed.
+  1780→
+  1781→        Returns
+  1782→        -------
+  1783→        list of dict
+  1784→            Each: ``{image: "...", video: "..."}`` (the image prompt and
+  1785→            the corresponding animation prompt).
+  1786→        """
+  1787→        image_model = _coerce(image_model)
+  1788→        video_model = _coerce(video_model)
+  1789→        prompt_model = _coerce(prompt_model)
+  1790→        resolution = _coerce(resolution)
+  1791→        aspect_ratio = _coerce(aspect_ratio)
+  1792→
+  1793→        config = {
+  1794→            "imageModel": image_model,
+  1795→            "videoModel": video_model,
+  1796→            "promptModel": prompt_model,
+  1797→            "resolution": resolution,
+  1798→            "aspectRatio": aspect_ratio,
+  1799→            "generationType": "t2v" if batch_type == "videos" else "t2i",
+  1800→            "batchVariation": True,
+  1801→            "directGeneration": True,
+  1802→        }
+  1803→        body = {
+  1804→            "prompt": prompt,
+  1805→            "systemPrompt": system_prompt,
+  1806→            "batchId": f"batch-{_uuid_v7()}",
+  1807→            "config": config,
+  1808→            "batchType": batch_type,
+  1809→        }
+  1810→        if project_id:
+  1811→            body["projectId"] = project_id
+  1812→        resp = self._post("/api/generate/prompts", json_body=body)
+  1813→        return resp.get("data", {}).get("variations", [])
+  1814→
+  1815→    # ------------------------------------------------------------------ #
+  1816→    #  LIP SYNC / ANIMATION
+  1817→    # ------------------------------------------------------------------ #
+  1818→    def generate_lipsync(
+  1819→        self,
+  1820→        project_id: str,
+  1821→        image_prompt: str,
+  1822→        script: str,
+  1823→        audio_url: str,
+  1824→        audio_duration_ms: int,
+  1825→        *,
+  1826→        engine: str = "midjen",
+  1827→        ingredients: Optional[List[dict]] = None,
+  1828→        aspect_ratio: Optional[Union[str, AspectRatio]] = None,
+  1829→        video_orientation: Optional[str] = None,
+  1830→        music_track: Optional[dict] = None,
+  1831→        custom_motion_prompt: Optional[str] = None,
+  1832→    ) -> dict:
+  1833→        """Generate a lip-synced video (image + audio + script).
+  1834→
+  1835→        The audio must already be uploaded to a CDN URL. Use
+  1836→        ``upload_audio_direct`` or ``tts`` + ``upload_audio_direct`` first.
+  1837→
+  1838→        Returns
+  1839→        -------
+  1840→        dict
+  1841→            Response includes ``data.batchId`` which you can poll with
+  1842→            ``poll_batch``.
+  1843→        """
+  1844→        body: Dict[str, Any] = {
+  1845→            "imagePrompt": image_prompt,
+  1846→            "audioUrl": audio_url,
+  1847→            "audioDurationMs": max(2000, audio_duration_ms),
+  1848→            "script": script,
+  1849→            "engine": engine,
+  1850→            "projectId": project_id,
+  1851→        }
+  1852→        if ingredients:
+  1853→            body["ingredients"] = ingredients
+  1854→        if aspect_ratio:
+  1855→            body["aspectRatio"] = _coerce(aspect_ratio)
+  1856→        if video_orientation:
+  1857→            body["videoOrientation"] = video_orientation
+  1858→        if music_track:
+  1859→            body["musicTrack"] = music_track
+  1860→        if custom_motion_prompt:
+  1861→            body["customMotionPrompt"] = custom_motion_prompt
+  1862→        return self._post("/api/animate/generate", json_body=body)
+  1863→
+  1864→    # ------------------------------------------------------------------ #
+  1865→    #  TTS (text-to-speech)
+  1866→    # ------------------------------------------------------------------ #
+  1867→    def list_voices(self) -> List[dict]:
+  1868→        """Return the list of available TTS voices.
+  1869→
+  1870→        Each voice: ``{id, name, description, sample}``.
+  1871→        """
+  1872→        return self._get("/api/studio/voices").get("voices", [])
+  1873→
+  1874→    def tts(self, text: str, voice: str, output_format: str = "mp3",
+  1875→            language: Optional[str] = None) -> dict:
+  1876→        """Synthesize speech via PlayAI TTS.
+  1877→
+  1878→        Parameters
+  1879→        ----------
+  1880→        text : str
+  1881→            The text to speak.
+  1882→        voice : str
+  1883→            Voice ID from ``list_voices`` (e.g., ``"play_ai_Marisol"``).
+  1884→        output_format : str
+  1885→            Default "mp3".
+  1886→        language : str, optional
+  1887→            Language code if needed.
+  1888→
+  1889→        Returns
+  1890→        -------
+  1891→        dict
+  1892→            ``{audioBase64, contentType}``. Use ``save_tts_audio()`` to
+  1893→            decode to a file, or pass to ``upload_audio_direct``.
+  1894→
+  1895→        Notes
+  1896→        -----
+  1897→        This endpoint depends on a server-side Facebook access token
+  1898→        that rotates. If you get ``403 Facebook expired access token``,
+  1899→        wait a few minutes and retry.
+  1900→        """
+  1901→        body: Dict[str, Any] = {
+  1902→            "text": text,
+  1903→            "voice": voice,
+  1904→            "outputFormat": output_format,
+  1905→        }
+  1906→        if language:
+  1907→            body["language"] = language
+  1908→        return self._post("/api/studio/playai/tts", json_body=body)
+  1909→
+  1910→    def save_tts_audio(self, tts_response: dict, path: str) -> str:
+  1911→        """Decode a TTS API response and save as an audio file.
+  1912→
+  1913→        Parameters
+  1914→        ----------
+  1915→        tts_response : dict
+  1916→            The response from ``tts()``.
+  1917→        path : str
+  1918→            Output file path (e.g., ``"out.mp3"``).
+  1919→
+  1920→        Returns
+  1921→        -------
+  1922→        str
+  1923→            The path written.
+  1924→        """
+  1925→        audio_bytes = base64.b64decode(tts_response["audioBase64"])
+  1926→        with open(path, "wb") as f:
+  1927→            f.write(audio_bytes)
+  1928→        return path
+  1929→
+  1930→    # ------------------------------------------------------------------ #
+  1931→    #  Uploads
+  1932→    # ------------------------------------------------------------------ #
+  1933→    def upload_image(self, image_base64: str) -> dict:
+  1934→        """Upload a base64-encoded image.
+  1935→
+  1936→        Returns
+  1937→        -------
+  1938→        dict
+  1939→            ``{mediaEntId, imageUrl}``. Use the ``mediaEntId`` as
+  1940→            ``sourceImageEntId`` for ``edit_image``, or pass the handle
+  1941→            to ``generate_video(start_frame_image_handle=...)``.
+  1942→        """
+  1943→        return self._post("/api/upload-image", json_body={"image": image_base64})
+  1944→
+  1945→    def upload_asset(self, image_base64: str) -> dict:
+  1946→        """Upload a base64-encoded image as a generic asset.
+  1947→
+  1948→        Used for playable thumbnails and preview video thumbnails.
+  1949→        Returns ``{mediaEntId}``.
+  1950→
+  1951→        Parameters
+  1952→        ----------
+  1953→        image_base64 : str
+  1954→            Base64-encoded image data (no data: prefix).
+  1955→        """
+  1956→        return self._post("/api/upload-asset", json_body={"image": image_base64})
+  1957→
+  1958→    def upload_image_file(self, path: str) -> dict:
+  1959→        """Read an image file from disk and upload it."""
+  1960→        with open(path, "rb") as f:
+  1961→            b64 = base64.b64encode(f.read()).decode("ascii")
+  1962→        return self.upload_image(b64)
+  1963→
+  1964→    def upload_video_direct(self, path: str, name: Optional[str] = None) -> dict:
+  1965→        """Upload a video file via multipart form data.
+  1966→
+  1967→        Returns
+  1968→        -------
+  1969→        dict
+  1970→            ``{mediaEntId, cdnUrl}``.
+  1971→        """
+  1972→        name = name or os.path.basename(path)
+  1973→        with open(path, "rb") as f:
+  1974→            files = {"video": (name, f)}
+  1975→            resp = self.session.post(
+  1976→                self._url("/api/upload-video-direct"),
+  1977→                files=files,
+  1978→                timeout=max(self.timeout, 600),
+  1979→            )
+  1980→        return self._check(resp)
+  1981→
+  1982→    def upload_audio_direct(self, path: str, name: Optional[str] = None) -> dict:
+  1983→        """Upload an audio file. Returns ``{cdnUrl, mediaEntId}``."""
+  1984→        name = name or os.path.basename(path)
+  1985→        with open(path, "rb") as f:
+  1986→            files = {"audio": (name, f)}
+  1987→            resp = self.session.post(
+  1988→                self._url("/api/upload-audio-direct"),
+  1989→                files=files,
+  1990→                timeout=max(self.timeout, 600),
+  1991→            )
+  1992→        return self._check(resp)
+  1993→
+  1994→    def upload_media(self, path: str, name: Optional[str] = None) -> dict:
+  1995→        """Generic media upload (image/video). Auto-detects type.
+  1996→
+  1997→        Returns
+  1998→        -------
+  1999→        dict
+  2000→            Contains ``aspectRatio``, ``dimensions``, ``mediaEntId``, etc.
+  2001→        """
+  2002→        name = name or os.path.basename(path)
+  2003→        with open(path, "rb") as f:
+  2004→            files = {"file": (name, f)}
+  2005→            data = {"filename": name}
+  2006→            resp = self.session.post(
+  2007→                self._url("/api/upload-media"),
+  2008→                files=files,
+  2009→                data=data,
+  2010→                timeout=max(self.timeout, 600),
+  2011→            )
+  2012→        return self._check(resp)
+  2013→
+  2014→    # ------------------------------------------------------------------ #
+  2015→    #  Media library
+  2016→    # ------------------------------------------------------------------ #
+  2017→    def list_media(
+  2018→        self,
+  2019→        limit: int = 50,
+  2020→        offset: int = 0,
+  2021→        type: Optional[str] = None,
+  2022→        sort: str = "newest",
+  2023→        search: Optional[str] = None,
+  2024→    ) -> dict:
+  2025→        """List media items in your library (videos, images, audio).
+  2026→
+  2027→        Returns
+  2028→        -------
+  2029→        dict
+  2030→            ``{items: [...], page: {count, hasMore, nextOffset}}``.
+  2031→            Each item has ``id``, ``type``, ``thumbnailUrl``, ``fullUrl``,
+  2032→            ``prompt``, ``isFavorited``, etc.
+  2033→        """
+  2034→        params: Dict[str, Any] = {"limit": limit, "offset": offset, "sort": sort}
+  2035→        if type:
+  2036→            params["type"] = type
+  2037→        if search:
+  2038→            params["search"] = search
+  2039→        return self._get("/api/media-library", params=params)
+  2040→
+  2041→    def favorite_content_item(self, content_item_id: str, favorite: bool = True) -> dict:
+  2042→        """Favorite or unfavorite a content item."""
+  2043→        return self._post(f"/api/content-items/{content_item_id}/favorite",
+  2044→                          json_body={"isFavorited": favorite})
+  2045→
+  2046→    def delete_content_items(self, ids: List[str]) -> dict:
+  2047→        """Bulk-delete content items (videos/images)."""
+  2048→        return self._post("/api/content-items/bulk-delete", json_body={"ids": ids})
+  2049→
+  2050→    def delete_content_item(self, content_item_id: str) -> dict:
+  2051→        """Delete a single content item."""
+  2052→        return self._delete(f"/api/content-items/{content_item_id}")
+  2053→
+  2054→    def retry_content_item(self, content_item_id: str) -> dict:
+  2055→        """Retry a failed content item."""
+  2056→        return self._post(f"/api/content-items/{content_item_id}/retry")
+  2057→
+  2058→    def feedback_content_item(self, content_item_id: str, feedback: dict) -> dict:
+  2059→        """Submit feedback on a content item."""
+  2060→        return self._post(f"/api/content-items/{content_item_id}/feedback", json_body=feedback)
+  2061→
+  2062→    # ------------------------------------------------------------------ #
+  2063→    #  Download
+  2064→    # ------------------------------------------------------------------ #
+  2065→    def download_video(self, content_item_id: str, output_path: str) -> str:
+  2066→        """Download a generated video as MP4 to ``output_path``.
+  2067→
+  2068→        Parameters
+  2069→        ----------
+  2070→        content_item_id : str
+  2071→            The ``id`` field from a batch content item, in the format
+  2072→            ``batch-{uuid}-content-{n}``. (Note: when you create batches
+  2073→            via this client, the server may add a timestamp suffix.)
+  2074→        output_path : str
+  2075→            Local file path to save to.
+  2076→
+  2077→        Returns
+  2078→        -------
+  2079→        str
+  2080→            ``output_path`` on success.
+  2081→        """
+  2082→        return self._download(content_item_id, output_path, "/api/download/video")
+  2083→
+  2084→    def download_image(self, content_item_id: str, output_path: str) -> str:
+  2085→        """Download a generated image as PNG to ``output_path``."""
+  2086→        return self._download(content_item_id, output_path, "/api/download/png")
+  2087→
+  2088→    def _download(self, content_item_id: str, output_path: str, endpoint: str) -> str:
+  2089→        url = self._url(f"{endpoint}?id={content_item_id}")
+  2090→        with self.session.get(url, stream=True, timeout=max(self.timeout, 600)) as r:
+  2091→            if not r.ok:
+  2092→                raise VibesAPIError(
+  2093→                    f"Download failed: HTTP {r.status_code}",
+  2094→                    status=r.status_code,
+  2095→                )
+  2096→            with open(output_path, "wb") as f:
+  2097→                for chunk in r.iter_content(chunk_size=64 * 1024):
+  2098→                    if chunk:
+  2099→                        f.write(chunk)
+  2100→        return output_path
+  2101→
+  2102→    # ------------------------------------------------------------------ #
+  2103→    #  Share links
+  2104→    # ------------------------------------------------------------------ #
+  2105→    def create_share_link(
+  2106→        self,
+  2107→        entity_type: str,           # "project" or "content-item"
+  2108→        entity_id: str,
+  2109→        expires_at: Optional[str] = None,
+  2110→        max_uses: Optional[int] = None,
+  2111→    ) -> dict:
+  2112→        """Create a shareable link for a project or content item."""
+  2113→        body: Dict[str, Any] = {"entityType": entity_type, "entityId": entity_id}
+  2114→        if expires_at:
+  2115→            body["expiresAt"] = expires_at
+  2116→        if max_uses is not None:
+  2117→            body["maxUses"] = max_uses
+  2118→        return self._post("/api/share-links", json_body=body).get("shareLink", {})
+  2119→
+  2120→    def list_share_links(self, entity_type: str, entity_id: str) -> List[dict]:
+  2121→        """List all active share links for an entity."""
+  2122→        params = {"entityType": entity_type, "entityId": entity_id}
+  2123→        return self._get("/api/share-links", params=params).get("shareLinks", [])
+  2124→
+  2125→    def revoke_share_link(self, share_link_id: str) -> None:
+  2126→        """Revoke a share link."""
+  2127→        self._delete(f"/api/share-links/{share_link_id}")
+  2128→
+  2129→    # ------------------------------------------------------------------ #
+  2130→    #  Studio ingredients (characters, styles, settings)
+  2131→    # ------------------------------------------------------------------ #
+  2132→    def list_ingredients(
+  2133→        self,
+  2134→        owner_filter: Union[str, OwnerFilter] = OwnerFilter.LIBRARY,
+  2135→        ingredient_type: Optional[Union[str, IngredientType]] = None,
+  2136→    ) -> List[dict]:
+  2137→        """List studio ingredients (characters, styles, settings).
+  2138→
+  2139→        Parameters
+  2140→        ----------
+  2141→        owner_filter : str | OwnerFilter
+  2142→            "LIBRARY" (your saved ingredients, default) or "VIEWER".
+  2143→        ingredient_type : str | IngredientType, optional
+  2144→            Filter to one type: CHARACTER, STYLE, or SETTING.
+  2145→
+  2146→        Returns
+  2147→        -------
+  2148→        list of dict
+  2149→            Each ingredient: ``{ingredientId, ingredientType, name,
+  2150→            imageUri, description, personality?, backstory?, coreBeliefs?}``.
+  2151→        """
+  2152→        owner_filter = _coerce(owner_filter)
+  2153→        params: Dict[str, Any] = {"ownerFilter": owner_filter}
+  2154→        if ingredient_type:
+  2155→            params["ingredientType"] = _coerce(ingredient_type)
+  2156→        return self._get("/api/studio/ingredients",
+  2157→                         params=params).get("ingredients", [])
+  2158→
+  2159→    def list_characters(self, owner_filter: Union[str, OwnerFilter] = OwnerFilter.LIBRARY) -> List[dict]:
+  2160→        """Shortcut: list only CHARACTER ingredients."""
+  2161→        return self.list_ingredients(owner_filter=owner_filter,
+  2162→                                     ingredient_type=IngredientType.CHARACTER)
+  2163→
+  2164→    def list_styles(self, owner_filter: Union[str, OwnerFilter] = OwnerFilter.LIBRARY) -> List[dict]:
+  2165→        """Shortcut: list only STYLE ingredients."""
+  2166→        return self.list_ingredients(owner_filter=owner_filter,
+  2167→                                     ingredient_type=IngredientType.STYLE)
+  2168→
+  2169→    def list_scenes(self, owner_filter: Union[str, OwnerFilter] = OwnerFilter.LIBRARY) -> List[dict]:
+  2170→        """Shortcut: list only SETTING (scene) ingredients."""
+  2171→        return self.list_ingredients(owner_filter=owner_filter,
+  2172→                                     ingredient_type=IngredientType.SETTING)
+  2173→
+  2174→    def create_ingredient(
+  2175→        self,
+  2176→        *,
+  2177→        name: str,
+  2178→        ingredient_type: Union[str, IngredientType],
+  2179→        source_image_ent_id: Optional[str] = None,
+  2180→        image_url: Optional[str] = None,
+  2181→        description: Optional[str] = None,
+  2182→        personality: Optional[str] = None,
+  2183→        backstory: Optional[str] = None,
+  2184→        core_beliefs: Optional[str] = None,
+  2185→    ) -> dict:
+  2186→        """Create a new studio ingredient (character / style / scene).
+  2187→
+  2188→        Parameters
+  2189→        ----------
+  2190→        name : str
+  2191→            Display name for the ingredient.
+  2192→        ingredient_type : str | IngredientType
+  2193→            CHARACTER, STYLE, or SETTING.
+  2194→        source_image_ent_id : str, optional
+  2195→            The ``imageEntId`` of an uploaded image to use as the
+  2196→            ingredient's image. Required if you want the ingredient to
+  2197→            have an image (which is usually the case).
+  2198→        image_url : str, optional
+  2199→            URL of the image (returned alongside imageEntId by upload_image).
+  2200→        description, personality, backstory, core_beliefs : str, optional
+  2201→            For CHARACTER ingredients, these text fields describe the
+  2202→            character. The Vibes UI fills them via LLM, but you can set
+  2203→            them manually here.
+  2204→
+  2205→        Returns
+  2206→        -------
+  2207→        dict
+  2208→            ``{ingredient: {ingredientId, name, ...}, usedExistingName: bool}``.
+  2209→            If a same-named ingredient already exists, ``usedExistingName``
+  2210→            is true and the existing ingredient is returned.
+  2211→        """
+  2212→        body: Dict[str, Any] = {
+  2213→            "name": name,
+  2214→            "ingredientType": _coerce(ingredient_type),
+  2215→        }
+  2216→        if source_image_ent_id:
+  2217→            body["sourceImageEntId"] = source_image_ent_id
+  2218→        if image_url:
+  2219→            body["imageUrl"] = image_url
+  2220→        if description:
+  2221→            body["description"] = description
+  2222→        if personality:
+  2223→            body["personality"] = personality
+  2224→        if backstory:
+  2225→            body["backstory"] = backstory
+  2226→        if core_beliefs:
+  2227→            body["coreBeliefs"] = core_beliefs
+  2228→        return self._post("/api/studio/ingredients", json_body=body)
+  2229→
+  2230→    def delete_ingredient(self, ingredient_id: str) -> None:
+  2231→        """Delete a studio ingredient by its ID."""
+  2232→        self._delete(f"/api/studio/ingredients/{ingredient_id}")
+  2233→
+  2234→    # ------------------------------------------------------------------ #
+  2235→    #  Moodboards
+  2236→    # ------------------------------------------------------------------ #
+  2237→    def list_moodboards(self) -> List[dict]:
+  2238→        return self._get("/api/moodboards").get("moodboards", [])
+  2239→
+  2240→    def get_moodboard(self, moodboard_id: str) -> dict:
+  2241→        return self._get(f"/api/moodboards/{moodboard_id}").get("moodboard", {})
+  2242→
+  2243→    def create_moodboard(self, name: str, moodboard_code: str, images: List[dict]) -> dict:
+  2244→        """Create a moodboard.
+  2245→
+  2246→        ``images`` is a list of ``{imageUrl, oilHandle?}`` dicts.
+  2247→        """
+  2248→        body = {"name": name, "moodboardCode": moodboard_code, "imageList": images}
+  2249→        return self._post("/api/moodboards", json_body=body).get("moodboard", {})
+  2250→
+  2251→    def delete_moodboard(self, moodboard_id: str) -> None:
+  2252→        self._delete(f"/api/moodboards/{moodboard_id}")
+  2253→
+  2254→    # ------------------------------------------------------------------ #
+  2255→    #  Music library
+  2256→    # ------------------------------------------------------------------ #
+  2257→    def search_music(self, query: str = "", limit: int = 30, cursor: Optional[str] = None) -> dict:
+  2258→        """Search the Meta music library.
+  2259→
+  2260→        Parameters
+  2261→        ----------
+  2262→        query : str
+  2263→            Search query. Empty for trending tracks.
+  2264→        limit : int
+  2265→            Page size.
+  2266→        cursor : str, optional
+  2267→            Pagination cursor from a prior call.
+  2268→
+  2269→        Returns
+  2270→        -------
+  2271→        dict
+  2272→            ``{tracks: [...], has_next_page: bool, next_cursor: str?}``.
+  2273→            Each track has ``audio_cluster_view_id``, ``preview_url``,
+  2274→            ``title``, ``artist``, etc.
+  2275→        """
+  2276→        params: Dict[str, Any] = {}
+  2277→        if query:
+  2278→            params["q"] = query
+  2279→            params["limit"] = str(limit)
+  2280→        else:
+  2281→            params["limit"] = "50"
+  2282→        if cursor:
+  2283→            params["cursor"] = cursor
+  2284→        return self._get("/api/meta-music", params=params)
+  2285→
+  2286→    def lookup_music_thumbnail(self, track_id: str, title: Optional[str] = None) -> Optional[str]:
+  2287→        """Resolve a thumbnail URL for a music track."""
+  2288→        path = f"/api/meta-music/lookup?id={track_id}"
+  2289→        if title:
+  2290→            path += f"&title={title}"
+  2291→        resp = self._get(path)
+  2292→        return resp.get("thumbnail_url")
+  2293→
+  2294→    def clip_music(
+  2295→        self,
+  2296→        audio_cluster_id: str,
+  2297→        preview_url: str,
+  2298→        start_ms: int,
+  2299→        end_ms: int,
+  2300→        max_duration_ms: int = 60000,
+  2301→    ) -> bytes:
+  2302→        """Extract a clipped segment from a music track.
+  2303→
+  2304→        Returns
+  2305→        -------
+  2306→        bytes
+  2307→            Raw audio bytes (audio/mpeg). Save to disk as ``.mp3``.
+  2308→        """
+  2309→        body = {
+  2310→            "audioClusterId": audio_cluster_id,
+  2311→            "previewUrl": preview_url,
+  2312→            "startMs": start_ms,
+  2313→            "endMs": end_ms,
+  2314→            "maxDurationMs": max_duration_ms,
+  2315→        }
+  2316→        resp = self.session.post(self._url("/api/media/music/clip"),
+  2317→                                 json=body, timeout=max(self.timeout, 120))
+  2318→        if not resp.ok:
+  2319→            raise VibesAPIError(f"Music clip failed: HTTP {resp.status_code}",
+  2320→                                status=resp.status_code)
+  2321→        return resp.content
+  2322→
+  2323→    def clip_audio(self, audio_url: str, start_ms: int, end_ms: int) -> bytes:
+  2324→        """Clip a segment from any audio URL.
+  2325→
+  2326→        Returns the clipped audio as bytes.
+  2327→        """
+  2328→        body = {"audioUrl": audio_url, "startMs": start_ms, "endMs": end_ms}
+  2329→        resp = self.session.post(self._url("/api/media/audio/clip"),
+  2330→                                 json=body, timeout=max(self.timeout, 120))
+  2331→        if not resp.ok:
+  2332→            raise VibesAPIError(f"Audio clip failed: HTTP {resp.status_code}",
+  2333→                                status=resp.status_code)
+  2334→        return resp.content
+  2335→
+  2336→    # ------------------------------------------------------------------ #
+  2337→    #  Timeline chat (streaming AI assistant)
+  2338→    # ------------------------------------------------------------------ #
+  2339→    DEFAULT_INSTRUCTIONS = (
+  2340→        "You are a creative timeline editing assistant for Vibes, a video "
+  2341→        "creation tool. The user is building a video by arranging clips, "
+  2342→        "music, text overlays, and effects on a timeline. The timeline is empty."
+  2343→    )
+  2344→
+  2345→    DEFAULT_TOOLS = [
+  2346→        {
+  2347→            "type": "function",
+  2348→            "name": "generate_image",
+  2349→            "description": "Generate a new image from a text prompt and place it on the timeline.",
+  2350→            "parameters": {
+  2351→                "type": "object",
+  2352→                "properties": {
+  2353→                    "prompt": {"type": "string", "description": "Detailed, descriptive prompt for image generation."},
+  2354→                    "start_time": {"type": "number", "description": "Start time in seconds on the timeline."},
+  2355→                    "end_time": {"type": "number", "description": "End time in seconds."},
+  2356→                    "count": {"type": "number", "description": "Number of images to generate (1-4, default 1)."},
+  2357→                },
+  2358→                "required": ["prompt", "start_time", "end_time"],
+  2359→            },
+  2360→        },
+  2361→        {
+  2362→            "type": "function",
+  2363→            "name": "generate_video",
+  2364→            "description": "Generate a new video from a text prompt and place it on the timeline.",
+  2365→            "parameters": {
+  2366→                "type": "object",
+  2367→                "properties": {
+  2368→                    "prompt": {"type": "string", "description": "Detailed, descriptive prompt for video generation."},
+  2369→                    "start_time": {"type": "number", "description": "Start time in seconds on the timeline."},
+  2370→                    "end_time": {"type": "number", "description": "End time in seconds."},
+  2371→                },
+  2372→                "required": ["prompt", "start_time", "end_time"],
+  2373→            },
+  2374→        },
+  2375→        {
+  2376→            "type": "function",
+  2377→            "name": "add_music",
+  2378→            "description": "Add a music track by searching the library with a mood/genre/title query.",
+  2379→            "parameters": {
+  2380→                "type": "object",
+  2381→                "properties": {
+  2382→                    "music_query": {"type": "string", "description": 'Search query (e.g., "upbeat electronic").'},
+  2383→                    "cover_entire_timeline": {"type": "boolean", "description": "If true, the music clip spans the full timeline duration."},
+  2384→                    "start_time": {"type": "number", "description": "Start time in seconds (if not covering)."},
+  2385→                },
+  2386→                "required": ["music_query"],
+  2387→            },
+  2388→        },
+  2389→        {
+  2390→            "type": "function",
+  2391→            "name": "add_text_overlay",
+  2392→            "description": "Add a text overlay to the timeline.",
+  2393→            "parameters": {
+  2394→                "type": "object",
+  2395→                "properties": {
+  2396→                    "text": {"type": "string", "description": "Text content for the overlay."},
+  2397→                    "start_time": {"type": "number", "description": "Start time in seconds."},
+  2398→                    "end_time": {"type": "number", "description": "End time in seconds."},
+  2399→                    "preset": {"type": "string", "description": "Optional effect preset: fade, slide-up, surround, strange, flash, slide, cinefade, glow, typewriter, highlight, glitch."},
+  2400→                    "font_size": {"type": "number", "description": "Font size in pixels (default 48)."},
+  2401→                    "color": {"type": "string", "description": 'Text color as hex (e.g., "#FF0000").'},
+  2402→                    "position": {"type": "string", "description": "Position: center (default), top-left, top-right, bottom-left, bottom-right, top, bottom, left, right."},
+  2403→                },
+  2404→                "required": ["text", "start_time", "end_time"],
+  2405→            },
+  2406→        },
+
+[showing lines 1707-2406 of 4109; use offset=2407 with limit to continue reading]

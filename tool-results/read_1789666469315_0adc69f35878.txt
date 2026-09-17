@@ -1,0 +1,764 @@
+  3346→    def generate_heygen_avatar(
+  3347→        self,
+  3348→        project_id: str,
+  3349→        *,
+  3350→        image_prompt: str,
+  3351→        script: str,
+  3352→        audio_url: str,
+  3353→        audio_duration_ms: int,
+  3354→        voice_id: Optional[str] = None,
+  3355→        aspect_ratio: Union[str, AspectRatio] = AspectRatio.LANDSCAPE,
+  3356→        custom_motion_prompt: Optional[str] = None,
+  3357→        ingredients: Optional[List[dict]] = None,
+  3358→        moodboard: Optional[dict] = None,
+  3359→    ) -> dict:
+  3360→        """Generate a HeyGen avatar animation (high-quality lip sync).
+  3361→
+  3362→        HeyGen is a separate provider from midjen — produces higher-quality
+  3363→        avatar lip sync but may have stricter quota.
+  3364→
+  3365→        Parameters
+  3366→        ----------
+  3367→        project_id : str
+  3368→            Target project.
+  3369→        image_prompt : str
+  3370→            Visual description of the avatar.
+  3371→        script : str
+  3372→            What the avatar will say.
+  3373→        audio_url : str
+  3374→            CDN URL of the narration audio (from TTS + upload).
+  3375→        audio_duration_ms : int
+  3376→            Audio duration in milliseconds.
+  3377→        voice_id : str, optional
+  3378→            HeyGen voice ID (different from PlayAI voice IDs).
+  3379→        aspect_ratio : str | AspectRatio
+  3380→            Output aspect ratio.
+  3381→        custom_motion_prompt : str, optional
+  3382→            Motion directive.
+  3383→        ingredients : list of dict, optional
+  3384→            Character/style/scene ingredients.
+  3385→        moodboard : dict, optional
+  3386→            Style reference.
+  3387→        """
+  3388→        aspect_ratio = _coerce(aspect_ratio)
+  3389→        body: Dict[str, Any] = {
+  3390→            "imagePrompt": image_prompt,
+  3391→            "audioUrl": audio_url,
+  3392→            "audioDurationMs": max(2000, audio_duration_ms),
+  3393→            "script": script,
+  3394→            "engine": "heygen",
+  3395→            "videoModel": "heygen-avatar-iv",
+  3396→            "projectId": project_id,
+  3397→            "aspectRatio": aspect_ratio,
+  3398→            "videoOrientation": "landscape" if aspect_ratio == "16:9" else "portrait",
+  3399→        }
+  3400→        if voice_id:
+  3401→            body["voiceId"] = voice_id
+  3402→        if custom_motion_prompt:
+  3403→            body["customMotionPrompt"] = custom_motion_prompt
+  3404→        if ingredients:
+  3405→            body["ingredients"] = ingredients
+  3406→        if moodboard:
+  3407→            if moodboard.get("moodboardCode"):
+  3408→                body["moodboardCode"] = moodboard["moodboardCode"]
+  3409→            if moodboard.get("moodboardId"):
+  3410→                body["moodboardId"] = moodboard["moodboardId"]
+  3411→        return self._post("/api/animate/generate", json_body=body)
+  3412→
+  3413→    def regenerate_lipsync(
+  3414→        self,
+  3415→        project_id: str,
+  3416→        source_video: dict,
+  3417→        *,
+  3418→        prompt: Optional[str] = None,
+  3419→        poll: bool = True,
+  3420→        poll_timeout: float = POLL_TIMEOUT,
+  3421→    ) -> dict:
+  3422→        """Regenerate a lip sync video using the same audio + new prompt.
+  3423→
+  3424→        Mirrors the "Regenerate lip sync" UI action.
+  3425→
+  3426→        Parameters
+  3427→        ----------
+  3428→        source_video : dict
+  3429→            The source lip sync content item.
+  3430→        prompt : str, optional
+  3431→            New image prompt for the avatar. If omitted, reuses the original.
+  3432→        """
+  3433→        structured = source_video.get("structuredOutput") or {}
+  3434→        if isinstance(structured, str):
+  3435→            try:
+  3436→                structured = json.loads(structured)
+  3437→            except ValueError:
+  3438→                structured = {}
+  3439→
+  3440→        source_config = source_video.get("config") or {}
+  3441→        audio_url = structured.get("audioUrl") or source_config.get("audioSourceUrl")
+  3442→        audio_ent_id = (
+  3443→            source_config.get("audioSourceEntId")
+  3444→            or structured.get("audioSourceEntId")
+  3445→        )
+  3446→        audio_duration_ms = structured.get("audio_duration_ms", 5000)
+  3447→        voice_id = structured.get("voice_id")
+  3448→        original_image_prompt = (
+  3449→            source_video.get("imagePrompt")
+  3450→            or source_video.get("prompt")
+  3451→            or structured.get("imagePrompt", "")
+  3452→        )
+  3453→
+  3454→        if not audio_url:
+  3455→            raise VibesAPIError(
+  3456→                "Cannot regenerate lip sync: audio URL not found in source. "
+  3457→                "Create a new lip sync video instead."
+  3458→            )
+  3459→
+  3460→        return self.generate_lipsync(
+  3461→            project_id=project_id,
+  3462→            image_prompt=prompt or original_image_prompt,
+  3463→            script=structured.get("script", ""),
+  3464→            audio_url=audio_url,
+  3465→            audio_duration_ms=audio_duration_ms,
+  3466→            ingredients=source_config.get("ingredients"),
+  3467→            music_track=source_config.get("musicTrack"),
+  3468→            moodboard=(
+  3469→                {"moodboardCode": source_config.get("moodboardCode"),
+  3470→                 "moodboardId": source_config.get("moodboardId"),
+  3471→                 "moodboard_name": source_config.get("moodboard_name"),
+  3472→                 "moodboard_thumbnail_url": source_config.get("moodboard_thumbnail_url")}
+  3473→                if source_config.get("moodboardCode") else None
+  3474→            ),
+  3475→            poll=poll,
+  3476→            poll_timeout=poll_timeout,
+  3477→        )
+  3478→
+  3479→    # ------------------------------------------------------------------ #
+  3480→    #  SSE auto-reconnect with exponential backoff
+  3481→    # ------------------------------------------------------------------ #
+  3482→    def stream_sync_updates_resilient(
+  3483→        self,
+  3484→        entity_type: str,
+  3485→        entity_id: str,
+  3486→        *,
+  3487→        max_retries: int = 5,
+  3488→        base_backoff: float = 1.0,
+  3489→        max_backoff: float = 30.0,
+  3490→    ) -> Iterator[dict]:
+  3491→        """Stream sync updates with auto-reconnect and exponential backoff.
+  3492→
+  3493→        Unlike ``stream_sync_updates()`` (single connection), this method
+  3494→        automatically reconnects on failure with exponential backoff,
+  3495→        matching the Vibes UI's behavior.
+  3496→
+  3497→        Parameters
+  3498→        ----------
+  3499→        entity_type, entity_id : str
+  3500→            Entity to watch.
+  3501→        max_retries : int
+  3502→            Max consecutive failures before giving up (default 5).
+  3503→        base_backoff : float
+  3504→            Initial backoff in seconds (default 1.0).
+  3505→        max_backoff : float
+  3506→            Cap on backoff (default 30.0).
+  3507→
+  3508→        Yields
+  3509→        ------
+  3510→        dict
+  3511→            Same events as ``stream_sync_updates()``.
+  3512→        """
+  3513→        retries = 0
+  3514→        while retries < max_retries:
+  3515→            try:
+  3516→                for event in self.stream_sync_updates(entity_type, entity_id):
+  3517→                    retries = 0  # reset on successful event
+  3518→                    yield event
+  3519→            except (VibesAPIError, ConnectionError) as e:
+  3520→                retries += 1
+  3521→                if retries >= max_retries:
+  3522→                    raise
+  3523→                backoff = min(base_backoff * (2 ** retries), max_backoff)
+  3524→                time.sleep(backoff)
+  3525→
+  3526→    def stream_batch_updates_resilient(
+  3527→        self,
+  3528→        batch_id: str,
+  3529→        *,
+  3530→        max_retries: int = 5,
+  3531→        base_backoff: float = 1.0,
+  3532→        max_backoff: float = 30.0,
+  3533→        idle_timeout: float = 300.0,
+  3534→    ) -> Iterator[dict]:
+  3535→        """Stream batch updates with auto-reconnect.
+  3536→
+  3537→        Stops when the batch is complete (``isComplete: true``) or after
+  3538→        ``idle_timeout`` seconds with no events.
+  3539→        """
+  3540→        retries = 0
+  3541→        last_event = time.time()
+  3542→        while retries < max_retries and time.time() - last_event < idle_timeout:
+  3543→            try:
+  3544→                for event in self.stream_batch_updates(batch_id):
+  3545→                    last_event = time.time()
+  3546→                    retries = 0
+  3547→                    yield event
+  3548→                    if event.get("isComplete"):
+  3549→                        return
+  3550→            except (VibesAPIError, ConnectionError):
+  3551→                retries += 1
+  3552→                if retries >= max_retries:
+  3553→                    raise
+  3554→                backoff = min(base_backoff * (2 ** retries), max_backoff)
+  3555→                time.sleep(backoff)
+  3556→
+  3557→    # ------------------------------------------------------------------ #
+  3558→    #  Rate limit handling + cooldown tracking
+  3559→    # ------------------------------------------------------------------ #
+  3560→    def get_rate_limit_status(self) -> Dict[str, Any]:
+  3561→        """Get current rate limit status.
+  3562→
+  3563→        Returns
+  3564→        -------
+  3565→        dict
+  3566→            ``{is_rate_limited: bool, rate_limit_seconds_left: int,
+  3567→            last_429_at: float | None, cooldown_until: float | None}``
+  3568→        """
+  3569→        now = time.time()
+  3570→        cooldown_until = getattr(self, "_rate_limit_cooldown_until", None)
+  3571→        last_429 = getattr(self, "_rate_limit_last_429", None)
+  3572→        is_limited = cooldown_until is not None and now < cooldown_until
+  3573→        seconds_left = max(0, int(cooldown_until - now)) if is_limited else 0
+  3574→        return {
+  3575→            "is_rate_limited": is_limited,
+  3576→            "rate_limit_seconds_left": seconds_left,
+  3577→            "last_429_at": last_429,
+  3578→            "cooldown_until": cooldown_until,
+  3579→        }
+  3580→
+  3581→    def _set_rate_limit_cooldown(self, seconds: int = 60) -> None:
+  3582→        """Internal: set a rate limit cooldown period."""
+  3583→        now = time.time()
+  3584→        self._rate_limit_last_429 = now
+  3585→        self._rate_limit_cooldown_until = now + seconds
+  3586→
+  3587→    def _check_rate_limit(self) -> None:
+  3588→        """Internal: raise if currently in rate limit cooldown."""
+  3589→        status = self.get_rate_limit_status()
+  3590→        if status["is_rate_limited"]:
+  3591→            raise VibesAPIError(
+  3592→                f"Rate limited — {status['rate_limit_seconds_left']}s remaining in cooldown",
+  3593→                status=429, code="RATE_LIMITED",
+  3594→            )
+  3595→
+  3596→    # Override _check to track rate limits
+  3597→    def _check_with_rate_limit(self, resp: requests.Response) -> dict:
+  3598→        """Wrap _check to track 429s and set cooldown."""
+  3599→        if resp.status_code == 429:
+  3600→            self._set_rate_limit_cooldown(seconds=60)
+  3601→        return self._check(resp)
+  3602→
+  3603→    # ------------------------------------------------------------------ #
+  3604→    #  Original audio check (oa-check)
+  3605→    # ------------------------------------------------------------------ #
+  3606→    def check_original_audio(self, track_ids: List[str]) -> dict:
+  3607→        """Check which music track IDs are original audio (OA).
+  3608→
+  3609→        Original audio tracks should be filtered out for most users.
+  3610→
+  3611→        Parameters
+  3612→        ----------
+  3613→        track_ids : list of str
+  3614→            ``audio_cluster_view_id`` values from ``search_music()``.
+  3615→
+  3616→        Returns
+  3617→        -------
+  3618→        dict
+  3619→            ``{oa_ids: [...], ...}`` — list of IDs that ARE original audio.
+  3620→        """
+  3621→        return self._post("/api/meta-music/oa-check", json_body={"track_ids": track_ids})
+  3622→
+  3623→    def search_music_filtered(
+  3624→        self,
+  3625→        query: str = "",
+  3626→        limit: int = 30,
+  3627→        cursor: Optional[str] = None,
+  3628→        *,
+  3629→        exclude_original_audio: bool = True,
+  3630→    ) -> dict:
+  3631→        """Search music with optional OA filtering.
+  3632→
+  3633→        By default, filters out original audio tracks (matches UI behavior
+  3634→        for "popular" searches).
+  3635→        """
+  3636→        results = self.search_music(query=query, limit=limit, cursor=cursor)
+  3637→        tracks = results.get("tracks", [])
+  3638→        if exclude_original_audio and tracks:
+  3639→            track_ids = [t["audio_cluster_view_id"] for t in tracks]
+  3640→            try:
+  3641→                oa_resp = self.check_original_audio(track_ids)
+  3642→                oa_ids = set(str(x) for x in oa_resp.get("oa_ids", []))
+  3643→                results["tracks"] = [
+  3644→                    t for t in tracks
+  3645→                    if str(t["audio_cluster_view_id"]) not in oa_ids
+  3646→                ]
+  3647→            except VibesAPIError:
+  3648→                pass  # If OA check fails, return unfiltered
+  3649→        return results
+  3650→
+  3651→    # ------------------------------------------------------------------ #
+  3652→    #  Check pending export on project load
+  3653→    # ------------------------------------------------------------------ #
+  3654→    def get_pending_export(self, project_id: str) -> Optional[dict]:
+  3655→        """Check if a project has a pending (in-progress) async export.
+  3656→
+  3657→        Mirrors the UI behavior of checking for in-progress exports when
+  3658→        opening a project.
+  3659→
+  3660→        Returns
+  3661→        -------
+  3662→        dict or None
+  3663→            ``{pending: {firstVideoSrc, progress, ...}}`` if there's a
+  3664→            pending export, None otherwise.
+  3665→        """
+  3666→        try:
+  3667→            resp = self._get(f"/api/projects/{project_id}/timeline/export/pending")
+  3668→            return resp.get("pending") if resp else None
+  3669→        except VibesAPIError:
+  3670→            return None
+  3671→
+  3672→    # ------------------------------------------------------------------ #
+  3673→    #  Audio URL resolution + proxy
+  3674→    # ------------------------------------------------------------------ #
+  3675→    def resolve_audio_urls(self, audio_ids: List[str]) -> dict:
+  3676→        """Batch-resolve CDN URLs for audio cluster IDs.
+  3677→
+  3678→        Useful for playing licensed audio that requires server-side
+  3679→        URL signing.
+  3680→
+  3681→        Parameters
+  3682→        ----------
+  3683→        audio_ids : list of str
+  3684→            Audio cluster view IDs.
+  3685→
+  3686→        Returns
+  3687→        -------
+  3688→        dict
+  3689→            ``{resolved: {id: url, ...}, failed: [...], unresolvable: [...],
+  3690→            originalAudio: [...]}``
+  3691→        """
+  3692→        return self._post("/api/resolve-audio-urls", json_body={"ids": audio_ids})
+  3693→
+  3694→    def proxy_audio_url(self, audio_id: str, title: Optional[str] = None) -> str:
+  3695→        """Build a Vibes proxy audio URL for an audio cluster ID.
+  3696→
+  3697→        The proxy endpoint signs the URL server-side so you can play
+  3698→        licensed audio without exposing the signed URL directly.
+  3699→
+  3700→        Returns
+  3701→        -------
+  3702→        str
+  3703→            URL like ``https://vibes.ai/api/proxy-audio?id=...&title=...``
+  3704→        """
+  3705→        url = self._url(f"/api/proxy-audio?id={audio_id}")
+  3706→        if title:
+  3707→            url += f"&title={title}"
+  3708→        return url
+  3709→
+  3710→    def proxy_audio_url_signed(self, signed_url: str) -> str:
+  3711→        """Build a proxy URL for an already-signed audio URL."""
+  3712→        from urllib.parse import quote
+  3713→        return self._url(f"/api/proxy-audio?signed_url={quote(signed_url, safe='')}")
+  3714→
+  3715→    # ------------------------------------------------------------------ #
+  3716→    #  Update ingredient (via Meta GraphQL)
+  3717→    # ------------------------------------------------------------------ #
+  3718→    def update_ingredient(
+  3719→        self,
+  3720→        ingredient_id: str,
+  3721→        *,
+  3722→        name: Optional[str] = None,
+  3723→        description: Optional[str] = None,
+  3724→        personality: Optional[str] = None,
+  3725→        backstory: Optional[str] = None,
+  3726→        core_beliefs: Optional[str] = None,
+  3727→        image_uri: Optional[str] = None,
+  3728→    ) -> dict:
+  3729→        """Update an existing ingredient.
+  3730→
+  3731→        Note: Vibes uses Meta GraphQL for ingredient updates (doc_id
+  3732→        ``UpdateIngredientMutation = 26515982254723441``). This method
+  3733→        sends the GraphQL request via ``/api/meta-graphql``.
+  3734→
+  3735→        Parameters
+  3736→        ----------
+  3737→        ingredient_id : str
+  3738→            The ingredient ID to update.
+  3739→        name, description, personality, backstory, core_beliefs : str, optional
+  3740→            Fields to update. Only set fields are updated.
+  3741→        image_uri : str, optional
+  3742→            New image URL.
+  3743→
+  3744→        Returns
+  3745→        -------
+  3746→        dict
+  3747→            GraphQL response data.
+  3748→        """
+  3749→        # Build the input object for the mutation
+  3750→        updates: Dict[str, Any] = {"id": ingredient_id}
+  3751→        if name is not None:
+  3752→            updates["name"] = name
+  3753→        if description is not None:
+  3754→            updates["description"] = description
+  3755→        if personality is not None:
+  3756→            updates["personality"] = personality
+  3757→        if backstory is not None:
+  3758→            updates["backstory"] = backstory
+  3759→        if core_beliefs is not None:
+  3760→            updates["core_beliefs"] = core_beliefs
+  3761→        if image_uri is not None:
+  3762→            updates["image_uri"] = image_uri
+  3763→
+  3764→        # UpdateIngredientMutation doc_id
+  3765→        body = {
+  3766→            "doc_id": "26515982254723441",  # UpdateIngredientMutation
+  3767→            "variables": {"input": updates},
+  3768→        }
+  3769→        return self._post("/api/meta-graphql", json_body=body)
+  3770→
+  3771→    # ------------------------------------------------------------------ #
+  3772→    #  Token validation
+  3773→    # ------------------------------------------------------------------ #
+  3774→    def check_token(self) -> bool:
+  3775→        """Check if the current session token is valid."""
+  3776→        try:
+  3777→            self._get("/api/auth/check-token")
+  3778→            return True
+  3779→        except VibesAPIError as e:
+  3780→            if e.status == 401:
+  3781→                return False
+  3782→            raise
+  3783→
+  3784→    # ------------------------------------------------------------------ #
+  3785→    #  Delete asset from project
+  3786→    # ------------------------------------------------------------------ #
+  3787→    def remove_project_asset(self, project_id: str, asset_id: str) -> None:
+  3788→        """Remove an asset from a project (does NOT delete the underlying media)."""
+  3789→        self._delete(f"/api/projects/{project_id}/assets/{asset_id}")
+  3790→
+  3791→    # ------------------------------------------------------------------ #
+  3792→    #  Generic download endpoint
+  3793→    # ------------------------------------------------------------------ #
+  3794→    def download_content(
+  3795→        self,
+  3796→        content_type: str,
+  3797→        content_id: str,
+  3798→        output_path: str,
+  3799→    ) -> str:
+  3800→        """Generic download via ``/api/download/{type}``.
+  3801→
+  3802→        Parameters
+  3803→        ----------
+  3804→        content_type : str
+  3805→            "video", "png", or other supported type.
+  3806→        content_id : str
+  3807→            Content item ID.
+  3808→        output_path : str
+  3809→            Local file path.
+  3810→        """
+  3811→        return self._download(content_id, output_path, f"/api/download/{content_type}")
+  3812→
+  3813→    # ------------------------------------------------------------------ #
+  3814→    #  Update batch (PUT)
+  3815→    # ------------------------------------------------------------------ #
+  3816→    def update_batch(self, batch_id: str, updates: dict) -> dict:
+  3817→        """Update a generation batch (PUT).
+  3818→
+  3819→        Used internally by the UI for optimistic updates. You usually
+  3820→        don't need this — use ``poll_batch()`` to read state instead.
+  3821→
+  3822→        Parameters
+  3823→        ----------
+  3824→        batch_id : str
+  3825→        updates : dict
+  3826→            Fields to update (e.g., ``{"content": [...], "isComplete": true}``).
+  3827→        """
+  3828→        return self._put(f"/api/generation-batches/{batch_id}", json_body=updates)
+  3829→
+  3830→    # ------------------------------------------------------------------ #
+  3831→    #  Filter media by ingredient
+  3832→    # ------------------------------------------------------------------ #
+  3833→    def list_media_by_ingredient(
+  3834→        self,
+  3835→        ingredient_id: str,
+  3836→        limit: int = 50,
+  3837→        offset: int = 0,
+  3838→    ) -> dict:
+  3839→        """List media items created with a specific ingredient.
+  3840→
+  3841→        Note: This filters client-side by checking ``config.ingredients``
+  3842→        on each item. For large libraries, this may be slow.
+  3843→        """
+  3844→        all_media = self.list_media(limit=limit * 2, offset=offset, type="video")
+  3845→        filtered = []
+  3846→        for item in all_media.get("items", []):
+  3847→            # Check if this item's config includes the ingredient
+  3848→            # We'd need to fetch the batch to check config, so we do a best-effort filter
+  3849→            # based on the batchId being in the item
+  3850→            batch_id = item.get("batchId")
+  3851→            if batch_id:
+  3852→                try:
+  3853→                    batch = self.get_batch(batch_id)
+  3854→                    config = batch.get("config") or {}
+  3855→                    ingredients = config.get("ingredients") or []
+  3856→                    if any(i.get("ingredientId") == ingredient_id for i in ingredients):
+  3857→                        filtered.append(item)
+  3858→                except VibesAPIError:
+  3859→                    continue
+  3860→            if len(filtered) >= limit:
+  3861→                break
+  3862→        return {
+  3863→            "items": filtered,
+  3864→            "page": all_media.get("page", {}),
+  3865→            "filtered_by_ingredient": ingredient_id,
+  3866→        }
+  3867→
+  3868→    # ------------------------------------------------------------------ #
+  3869→    #  Composition helpers (using the Composition class)
+  3870→    # ------------------------------------------------------------------ #
+  3871→    def get_composition(self, project_id: str) -> Composition:
+  3872→        """Get a project's composition as a ``Composition`` helper object.
+  3873→
+  3874→        Shortcut for::
+  3875→
+  3876→            project = client.get_project(project_id)
+  3877→            comp = Composition(project["composition"])
+  3878→        """
+  3879→        from .composition import Composition
+  3880→        project = self.get_project(project_id)
+  3881→        return Composition.from_project(project)
+  3882→
+  3883→    def save_composition_obj(self, project_id: str, comp: "Composition") -> dict:
+  3884→        """Save a ``Composition`` helper object back to a project.
+  3885→
+  3886→        Shortcut for::
+  3887→
+  3888→            client.save_composition(project_id, comp.to_dict())
+  3889→        """
+  3890→        return self.save_composition(project_id, comp.to_dict())
+  3891→
+  3892→    # ------------------------------------------------------------------ #
+  3893→    #  Client-side validation helpers
+  3894→    # ------------------------------------------------------------------ #
+  3895→    @staticmethod
+  3896→    def validate_prompt_length(prompt: str, max_length: int = 10000) -> dict:
+  3897→        """Validate that a prompt is within the allowed length.
+  3898→
+  3899→        Returns
+  3900→        -------
+  3901→        dict
+  3902→            ``{success: bool, error: str?}``
+  3903→        """
+  3904→        if not prompt or not isinstance(prompt, str):
+  3905→            return {"success": True, "value": ""}
+  3906→        if len(prompt) > max_length:
+  3907→            return {
+  3908→                "success": False,
+  3909→                "error": f"Prompt must be {max_length:,} characters or fewer",
+  3910→            }
+  3911→        return {"success": True, "value": prompt}
+  3912→
+  3913→    @staticmethod
+  3914→    def validate_project_name(name: str, max_length: int = 255) -> dict:
+  3915→        """Validate a project name (max 255 chars)."""
+  3916→        if len(name) > max_length:
+  3917→            return {
+  3918→                "success": False,
+  3919→                "error": f"Project name must be {max_length} characters or less",
+  3920→            }
+  3921→        return {"success": True, "value": name}
+  3922→
+  3923→    @staticmethod
+  3924→    def validate_username(name: str) -> dict:
+  3925→        """Validate a username (3-30 chars)."""
+  3926→        if len(name) < 3:
+  3927→            return {"success": False, "error": "Username must be at least 3 characters"}
+  3928→        if len(name) > 30:
+  3929→            return {"success": False, "error": "Username must be 30 characters or fewer"}
+  3930→        return {"success": True, "value": name}
+  3931→
+  3932→    @staticmethod
+  3933→    def validate_image_size(file_path: str, max_size_bytes: int = 10 * 1024 * 1024,
+  3934→                            max_dimension: int = 4096) -> dict:
+  3935→        """Validate that an image file is within size and dimension limits.
+  3936→
+  3937→        Returns
+  3938→        -------
+  3939→        dict
+  3940→            ``{success: bool, error: str?, dimensions: {width, height}?}``
+  3941→        """
+  3942→        import os
+  3943→        if not os.path.exists(file_path):
+  3944→            return {"success": False, "error": f"File not found: {file_path}"}
+  3945→        size = os.path.getsize(file_path)
+  3946→        if size > max_size_bytes:
+  3947→            return {
+  3948→                "success": False,
+  3949→                "error": f"File too large: {size:,} bytes (max {max_size_bytes:,})",
+  3950→            }
+  3951→        # Try to read dimensions (optional — only if PIL is available)
+  3952→        try:
+  3953→            from PIL import Image
+  3954→            with Image.open(file_path) as img:
+  3955→                w, h = img.size
+  3956→            if w > max_dimension or h > max_dimension:
+  3957→                return {
+  3958→                    "success": False,
+  3959→                    "error": f"Image too large: {w}x{h} (max {max_dimension}x{max_dimension})",
+  3960→                    "dimensions": {"width": w, "height": h},
+  3961→                }
+  3962→            return {"success": True, "dimensions": {"width": w, "height": h}}
+  3963→        except ImportError:
+  3964→            # PIL not available — skip dimension check
+  3965→            return {"success": True, "note": "PIL not available; dimension check skipped"}
+  3966→
+  3967→    @staticmethod
+  3968→    def validate_music_clip_duration(start_ms: int, end_ms: int,
+  3969→                                     max_duration_ms: int = 60000) -> dict:
+  3970→        """Validate a music clip duration (max 60s per song)."""
+  3971→        duration = end_ms - start_ms
+  3972→        if duration <= 0:
+  3973→            return {"success": False, "error": "End must be greater than start"}
+  3974→        if duration > max_duration_ms:
+  3975→            return {
+  3976→                "success": False,
+  3977→                "error": f"Music clips cannot exceed {max_duration_ms // 1000}s",
+  3978→            }
+  3979→        return {"success": True, "duration_ms": duration}
+  3980→
+  3981→    @staticmethod
+  3982→    def validate_music_clip_short(start_ms: int, end_ms: int,
+  3983→                                  max_duration_ms: int = 9000) -> dict:
+  3984→        """Validate a short music clip (max 9s for MUSIC_CLIP_MAX_DURATION_MS)."""
+  3985→        duration = end_ms - start_ms
+  3986→        if duration <= 0:
+  3987→            return {"success": False, "error": "End must be greater than start"}
+  3988→        if duration > max_duration_ms:
+  3989→            return {
+  3990→                "success": False,
+  3991→                "error": f"Short music clips cannot exceed {max_duration_ms // 1000}s",
+  3992→            }
+  3993→        return {"success": True, "duration_ms": duration}
+  3994→
+  3995→    # ------------------------------------------------------------------ #
+  3996→    #  Midjourney parameter parsing (sref / oref / chaos / stylize / etc.)
+  3997→    # ------------------------------------------------------------------ #
+  3998→    @staticmethod
+  3999→    def parse_midjourney_params(prompt: str) -> dict:
+  4000→        """Parse Midjourney-style parameters from a prompt.
+  4001→
+  4002→        Extracts parameters like ``--sref``, ``--oref``, ``--sw``,
+  4003→        ``--ow``, ``--seed``, ``--chaos``, ``--stylize``, ``--ar``,
+  4004→        ``--v``, ``--niji``, ``--loop``, ``--raw``, ``--tile``,
+  4005→        ``--turbo``, ``--relax``, ``--stealth``, ``--public``,
+  4006→        ``--draft``, ``--video``, ``--fast``, ``--style``.
+  4007→
+  4008→        Returns
+  4009→        -------
+  4010→        dict
+  4011→            ``{cleanPrompt: str, parameters: {sref: ..., oref: ...,
+  4012→            sref_weight: ..., oref_weight: ..., seed: ..., chaos: ...,
+  4013→            stylize: ..., aspect_ratio: ..., version: ..., niji: bool,
+  4014→            loop: bool, raw: bool, tile: bool, ...}}``
+  4015→        """
+  4016→        params: Dict[str, Any] = {}
+  4017→        clean = prompt
+  4018→
+  4019→        # --sref (style reference, can be URL, random, or numeric IDs)
+  4020→        import re
+  4021→        sref_match = re.search(r'--sref\s+([^\s-]+(?:\s+[^\s-]+)*?)(?=\s+--|$)', prompt)
+  4022→        if sref_match:
+  4023→            sref_val = sref_match.group(1).strip()
+  4024→            if sref_val.lower() == "random":
+  4025→                params["sref_random"] = True
+  4026→                params["sref_value"] = sref_val
+  4027→            else:
+  4028→                params["sref_value"] = sref_val
+  4029→                # Extract numeric IDs
+  4030→                nums = [x for x in sref_val.split() if x.isdigit()]
+  4031→                if nums:
+  4032→                    params["sref_ids"] = [int(n) for n in nums]
+  4033→            clean = clean.replace(sref_match.group(0), "").strip()
+  4034→
+  4035→        # --oref (object/character reference)
+  4036→        oref_match = re.search(r'--oref\s+([^\s-]+(?:\s+[^\s-]+)*?)(?=\s+--|$)', prompt)
+  4037→        if oref_match:
+  4038→            oref_val = oref_match.group(1).strip()
+  4039→            params["oref_value"] = oref_val
+  4040→            nums = [x for x in oref_val.split() if x.isdigit()]
+  4041→            if nums:
+  4042→                params["oref_ids"] = [int(n) for n in nums]
+  4043→            clean = clean.replace(oref_match.group(0), "").strip()
+  4044→
+  4045→        # --sw (sref weight)
+  4046→        sw_match = re.search(r'--sw\s+([\d.]+)', prompt)
+  4047→        if sw_match:
+  4048→            params["sref_weight"] = float(sw_match.group(1))
+  4049→            clean = clean.replace(sw_match.group(0), "").strip()
+  4050→
+  4051→        # --ow (oref weight)
+  4052→        ow_match = re.search(r'--ow\s+([\d.]+)', prompt)
+  4053→        if ow_match:
+  4054→            params["oref_weight"] = float(ow_match.group(1))
+  4055→            clean = clean.replace(ow_match.group(0), "").strip()
+  4056→
+  4057→        # --seed
+  4058→        seed_match = re.search(r'--seed\s+(\d+)', prompt)
+  4059→        if seed_match:
+  4060→            params["seed"] = int(seed_match.group(1))
+  4061→            clean = clean.replace(seed_match.group(0), "").strip()
+  4062→
+  4063→        # --chaos / --c
+  4064→        chaos_match = re.search(r'--(?:chaos|c)\s+(\d+)', prompt)
+  4065→        if chaos_match:
+  4066→            params["chaos"] = int(chaos_match.group(1))
+  4067→            clean = clean.replace(chaos_match.group(0), "").strip()
+  4068→
+  4069→        # --stylize / --s
+  4070→        stylize_match = re.search(r'--(?:stylize|s)\s+(\d+)', prompt)
+  4071→        if stylize_match:
+  4072→            params["stylize"] = int(stylize_match.group(1))
+  4073→            clean = clean.replace(stylize_match.group(0), "").strip()
+  4074→
+  4075→        # --ar (aspect ratio)
+  4076→        ar_match = re.search(r'--ar\s+(\d+:\d+)', prompt)
+  4077→        if ar_match:
+  4078→            params["aspect_ratio"] = ar_match.group(1)
+  4079→            clean = clean.replace(ar_match.group(0), "").strip()
+  4080→
+  4081→        # --v (version)
+  4082→        v_match = re.search(r'--v\s+([\d.]+)', prompt)
+  4083→        if v_match:
+  4084→            params["version"] = float(v_match.group(1))
+  4085→            clean = clean.replace(v_match.group(0), "").strip()
+  4086→
+  4087→        # Boolean flags
+  4088→        for flag in ["niji", "loop", "raw", "tile", "turbo", "relax",
+  4089→                     "stealth", "public", "draft", "video", "fast"]:
+  4090→            if re.search(rf'--{flag}\b', prompt):
+  4091→                params[flag] = True
+  4092→                clean = re.sub(rf'--{flag}\b\s*', '', clean).strip()
+  4093→
+  4094→        # --style
+  4095→        style_match = re.search(r'--style\s+([^\s-]+)', prompt)
+  4096→        if style_match:
+  4097→            params["style"] = style_match.group(1)
+  4098→            clean = clean.replace(style_match.group(0), "").strip()
+  4099→
+  4100→        # Clean up extra whitespace
+  4101→        clean = re.sub(r'\s+', ' ', clean).strip()
+  4102→
+  4103→        return {
+  4104→            "cleanPrompt": clean,
+  4105→            "parameters": params,
+  4106→            "hasRandomSref": params.get("sref_random", False),
+  4107→            "originalSrefValue": params.get("sref_value"),
+  4108→        }
+  4109→

@@ -1,0 +1,853 @@
+     1→"""
+     2→Timeline Composition helpers — manipulate the composition JSON that
+     3→Vibes uses to represent a video timeline (tracks, clips, text overlays,
+     4→audio, effects).
+     5→
+     6→The web app does all of these operations **client-side** before saving
+     7→the composition via ``PUT /api/projects/{id}`` (or
+     8→``POST /api/projects/{id}/timeline/download`` for export). This module
+     9→mirrors that behavior so you can build / edit timelines programmatically.
+    10→
+    11→Composition structure
+    12→---------------------
+    13→A composition is a dict shaped like::
+    14→
+    15→    {
+    16→        "id": "studio-composition",
+    17→        "tracks": [
+    18→            {
+    19→                "id": "video-track",
+    20→                "type": "video",
+    21→                "label": "Video",
+    22→                "items": [
+    23→                    {
+    24→                        "id": "clip-1",
+    25→                        "trackId": "video-track",
+    26→                        "name": "sunset",
+    27→                        "src": "https://.../sunset.mp4",
+    28→                        "start": 0.0,
+    29→                        "duration": 5.0,
+    30→                        "sourceDuration": 5.0,
+    31→                        "mediaType": "video",
+    32→                        "trimStart": 0.0,
+    33→                        "trimEnd": 0.0,
+    34→                        "fadeIn": 0.0,
+    35→                        "fadeOut": 0.0,
+    36→                        "volume": 1.0,
+    37→                        "speed": 1.0,
+    38→                        "muted": False,
+    39→                    },
+    40→                    ...
+    41→                ],
+    42→            },
+    43→            {
+    44→                "id": "text-track",
+    45→                "type": "text",
+    46→                "label": "Text",
+    47→                "items": [
+    48→                    {
+    49→                        "id": "text-1",
+    50→                        "trackId": "text-track",
+    51→                        "text": "Hello world",
+    52→                        "start": 0.0,
+    53→                        "duration": 3.0,
+    54→                        "fontSize": 48,
+    55→                        "color": "#FFFFFF",
+    56→                        "position": "center",
+    57→                        "preset": "fade",
+    58→                    },
+    59→                ],
+    60→            },
+    61→            {
+    62→                "id": "music-track",
+    63→                "type": "uploaded-audio",
+    64→                "label": "Music",
+    65→                "items": [
+    66→                    {
+    67→                        "id": "music-1",
+    68→                        "trackId": "music-track",
+    69→                        "name": "Lofi beat",
+    70→                        "src": "https://.../music.mp3",
+    71→                        "start": 0.0,
+    72→                        "duration": 30.0,
+    73→                        "sourceDuration": 30.0,
+    74→                        "volume": 0.5,
+    75→                        "fadeIn": 0.5,
+    76→                        "fadeOut": 1.0,
+    77→                    },
+    78→                ],
+    79→            },
+    80→        ],
+    81→        "duration": 30.0,
+    82→    }
+    83→
+    84→Example
+    85→-------
+    86→    from vibes_api import VibesClient
+    87→    from vibes_api.composition import Composition
+    88→
+    89→    client = VibesClient(meta_session="...")
+    90→    project = client.get_project("...")
+    91→    comp = Composition(project["composition"])
+    92→
+    93→    # Add a video clip at 5s
+    94→    comp.add_video_clip(src="https://.../clip.mp4", start=5.0, duration=5.0, name="intro")
+    95→
+    96→    # Add a text overlay from 0-3s with fade preset
+    97→    comp.add_text_overlay(text="Welcome!", start=0.0, end=3.0, preset="fade")
+    98→
+    99→    # Resize the first video clip to 4 seconds
+   100→    comp.resize_clip(clip_id=comp.video_track["items"][0]["id"], new_duration=4.0)
+   101→
+   102→    # Save back to the project
+   103→    client.save_composition(project["id"], comp.to_dict())
+   104→"""
+   105→
+   106→from __future__ import annotations
+   107→
+   108→import copy
+   109→import secrets
+   110→import time
+   111→from typing import Any, Dict, List, Optional, Tuple, Union
+   112→
+   113→
+   114→def _new_id(prefix: str = "clip") -> str:
+   115→    """Generate a unique clip/track ID."""
+   116→    return f"{prefix}-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
+   117→
+   118→
+   119→class Composition:
+   120→    """A builder/manipulator for a Vibes timeline composition.
+   121→
+   122→    Wrap an existing composition dict (from ``client.get_project(id)["composition"]``)
+   123→    or start from scratch with ``Composition.create_empty()``.
+   124→
+   125→    All operations mutate the composition in place; call ``to_dict()`` to
+   126→    serialize for saving.
+   127→    """
+   128→
+   129→    # ---- Construction ----
+   130→    def __init__(self, data: Optional[Dict[str, Any]] = None):
+   131→        self._data: Dict[str, Any] = copy.deepcopy(data) if data else self.create_empty()._data
+   132→
+   133→    @classmethod
+   134→    def create_empty(cls, duration: float = 5.0) -> "Composition":
+   135→        """Create a fresh empty composition with one video track."""
+   136→        return cls({
+   137→            "id": "studio-composition",
+   138→            "tracks": [
+   139→                {
+   140→                    "id": "video-track",
+   141→                    "type": "video",
+   142→                    "label": "Video",
+   143→                    "items": [],
+   144→                }
+   145→            ],
+   146→            "duration": duration,
+   147→        })
+   148→
+   149→    @classmethod
+   150→    def from_project(cls, project: Dict[str, Any]) -> "Composition":
+   151→        """Build a Composition from a project dict returned by ``get_project()``."""
+   152→        return cls(project.get("composition"))
+   153→
+   154→    def to_dict(self) -> Dict[str, Any]:
+   155→        """Serialize to a plain dict (for ``client.save_composition()``)."""
+   156→        return copy.deepcopy(self._data)
+   157→
+   158→    def clone(self) -> "Composition":
+   159→        """Return a deep copy of this composition."""
+   160→        return Composition(self.to_dict())
+   161→
+   162→    # ---- Properties ----
+   163→    @property
+   164→    def tracks(self) -> List[Dict[str, Any]]:
+   165→        return self._data.get("tracks", [])
+   166→
+   167→    @property
+   168→    def duration(self) -> float:
+   169→        return float(self._data.get("duration", 0.0))
+   170→
+   171→    @duration.setter
+   172→    def duration(self, value: float) -> None:
+   173→        self._data["duration"] = float(value)
+   174→
+   175→    @property
+   176→    def video_track(self) -> Optional[Dict[str, Any]]:
+   177→        """First track of type 'video' (creates one if missing)."""
+   178→        for t in self.tracks:
+   179→            if t.get("type") == "video":
+   180→                return t
+   181→        # Create one
+   182→        return self.add_track(track_type="video", label="Video", track_id="video-track")
+   183→
+   184→    @property
+   185→    def text_track(self) -> Optional[Dict[str, Any]]:
+   186→        for t in self.tracks:
+   187→            if t.get("type") == "text":
+   188→                return t
+   189→        return self.add_track(track_type="text", label="Text", track_id="text-track")
+   190→
+   191→    @property
+   192→    def video_items(self) -> List[Dict[str, Any]]:
+   193→        """All clips in the video track."""
+   194→        vt = self.video_track
+   195→        return vt["items"] if vt else []
+   196→
+   197→    @property
+   198→    def total_video_duration(self) -> float:
+   199→        """End time of the last video clip."""
+   200→        if not self.video_items:
+   201→            return 0.0
+   202→        return max(item.get("start", 0) + item.get("duration", 0)
+   203→                   for item in self.video_items)
+   204→
+   205→    # ---- Track operations ----
+   206→    def add_track(
+   207→        self,
+   208→        track_type: str,
+   209→        label: Optional[str] = None,
+   210→        track_id: Optional[str] = None,
+   211→    ) -> Dict[str, Any]:
+   212→        """Add a new track.
+   213→
+   214→        Parameters
+   215→        ----------
+   216→        track_type : str
+   217→            "video", "text", "uploaded-audio", "library-music", or custom.
+   218→        label : str, optional
+   219→            Display name for the track.
+   220→        track_id : str, optional
+   221→            Stable ID; auto-generated if omitted.
+   222→        """
+   223→        track_id = track_id or _new_id("track")
+   224→        label = label or track_type.capitalize()
+   225→        track = {"id": track_id, "type": track_type, "label": label, "items": []}
+   226→        self._data.setdefault("tracks", []).append(track)
+   227→        return track
+   228→
+   229→    def get_track(self, track_id: str) -> Optional[Dict[str, Any]]:
+   230→        for t in self.tracks:
+   231→            if t["id"] == track_id:
+   232→                return t
+   233→        return None
+   234→
+   235→    def delete_track(self, track_id: str) -> bool:
+   236→        """Delete an entire track and all its clips. Returns True if found."""
+   237→        before = len(self.tracks)
+   238→        self._data["tracks"] = [t for t in self.tracks if t["id"] != track_id]
+   239→        return len(self.tracks) < before
+   240→
+   241→    def rename_track(self, track_id: str, label: str) -> bool:
+   242→        """Rename a track. Returns True if found."""
+   243→        t = self.get_track(track_id)
+   244→        if t:
+   245→            t["label"] = label
+   246→            return True
+   247→        return False
+   248→
+   249→    def mute_track(self, track_id: str, muted: bool = True) -> bool:
+   250→        """Mute or unmute a track. Returns True if found."""
+   251→        t = self.get_track(track_id)
+   252→        if t:
+   253→            t["muted"] = muted
+   254→            return True
+   255→        return False
+   256→
+   257→    # ---- Clip lookup helpers ----
+   258→    def find_clip(self, clip_id: str) -> Tuple[Optional[Dict], Optional[Dict]]:
+   259→        """Find a clip by ID across all tracks.
+   260→
+   261→        Returns ``(track, clip)`` or ``(None, None)`` if not found.
+   262→        """
+   263→        for t in self.tracks:
+   264→            for c in t.get("items", []):
+   265→                if c.get("id") == clip_id:
+   266→                    return t, c
+   267→        return None, None
+   268→
+   269→    def find_clip_by_name(self, name: str) -> Tuple[Optional[Dict], Optional[Dict]]:
+   270→        """Find the first clip with a matching name. Returns ``(track, clip)``."""
+   271→        for t in self.tracks:
+   272→            for c in t.get("items", []):
+   273→                if c.get("name") == name:
+   274→                    return t, c
+   275→        return None, None
+   276→
+   277→    # ---- Adding clips ----
+   278→    def add_video_clip(
+   279→        self,
+   280→        *,
+   281→        src: str,
+   282→        start: float,
+   283→        duration: Optional[float] = None,
+   284→        source_duration: Optional[float] = None,
+   285→        name: Optional[str] = None,
+   286→        track_id: Optional[str] = None,
+   287→        media_type: str = "video",
+   288→        content_item_id: Optional[str] = None,
+   289→        trim_start: float = 0.0,
+   290→        trim_end: float = 0.0,
+   291→        volume: float = 1.0,
+   292→        speed: float = 1.0,
+   293→        muted: bool = False,
+   294→        fade_in: float = 0.0,
+   295→        fade_out: float = 0.0,
+   296→    ) -> Dict[str, Any]:
+   297→        """Add a video clip to the timeline.
+   298→
+   299→        Parameters
+   300→        ----------
+   301→        src : str
+   302→            URL of the video file.
+   303→        start : float
+   304→            Start time in seconds on the timeline.
+   305→        duration : float, optional
+   306→            Clip duration in seconds. Defaults to ``source_duration``.
+   307→        source_duration : float, optional
+   308→            Original duration of the source video (for trim calculations).
+   309→        name : str, optional
+   310→            Display name (defaults to first 50 chars of ``src``).
+   311→        track_id : str, optional
+   312→            Track to add to (defaults to the video track).
+   313→        media_type : str
+   314→            "video" (default) or "image" for image clips.
+   315→        content_item_id : str, optional
+   316→            Reference to the source content item (from ``generate_video``).
+   317→        trim_start, trim_end : float
+   318→            Trim offsets in seconds from source start/end.
+   319→        volume : float
+   320→            0.0 (silent) to 1.0 (full).
+   321→        speed : float
+   322→            0.1 to 10.0 (1.0 = normal).
+   323→        muted : bool
+   324→            Mute the clip's audio.
+   325→        fade_in, fade_out : float
+   326→            Fade durations in seconds (must not exceed half the clip duration).
+   327→        """
+   328→        if duration is None:
+   329→            duration = source_duration or 5.0
+   330→        if source_duration is None:
+   331→            source_duration = duration
+   332→
+   333→        track = self.get_track(track_id) if track_id else self.video_track
+   334→        if track is None:
+   335→            track = self.add_track("video", label="Video", track_id=track_id)
+   336→
+   337→        clip = {
+   338→            "id": _new_id("clip"),
+   339→            "trackId": track["id"],
+   340→            "name": name or (src[:50] if src else "Untitled"),
+   341→            "src": src,
+   342→            "start": float(start),
+   343→            "duration": float(duration),
+   344→            "sourceDuration": float(source_duration),
+   345→            "mediaType": media_type,
+   346→            "trimStart": float(trim_start),
+   347→            "trimEnd": float(trim_end),
+   348→            "volume": float(volume),
+   349→            "speed": float(speed),
+   350→            "muted": bool(muted),
+   351→            "fadeIn": float(fade_in),
+   352→            "fadeOut": float(fade_out),
+   353→        }
+   354→        if content_item_id:
+   355→            clip["contentItemId"] = content_item_id
+   356→
+   357→        track["items"].append(clip)
+   358→        # Extend timeline duration if needed
+   359→        end = clip["start"] + clip["duration"]
+   360→        if end > self.duration:
+   361→            self.duration = end
+   362→        return clip
+   363→
+   364→    def add_image_clip(
+   365→        self,
+   366→        *,
+   367→        src: str,
+   368→        start: float,
+   369→        duration: float = 5.0,
+   370→        name: Optional[str] = None,
+   371→        track_id: Optional[str] = None,
+   372→        content_item_id: Optional[str] = None,
+   373→    ) -> Dict[str, Any]:
+   374→        """Add a still image clip to the timeline."""
+   375→        return self.add_video_clip(
+   376→            src=src, start=start, duration=duration, source_duration=duration,
+   377→            name=name, track_id=track_id, media_type="image",
+   378→            content_item_id=content_item_id,
+   379→        )
+   380→
+   381→    def add_audio_clip(
+   382→        self,
+   383→        *,
+   384→        src: str,
+   385→        start: float,
+   386→        duration: float,
+   387→        source_duration: Optional[float] = None,
+   388→        name: Optional[str] = None,
+   389→        track_id: Optional[str] = None,
+   390→        track_type: str = "uploaded-audio",
+   391→        track_label: Optional[str] = None,
+   392→        volume: float = 1.0,
+   393→        fade_in: float = 0.0,
+   394→        fade_out: float = 0.0,
+   395→        trim_start: float = 0.0,
+   396→        trim_end: float = 0.0,
+   397→        linked_item_id: Optional[str] = None,
+   398→        link_type: Optional[str] = None,
+   399→    ) -> Dict[str, Any]:
+   400→        """Add an audio clip (uploaded audio or library music).
+   401→
+   402→        Parameters
+   403→        ----------
+   404→        src : str
+   405→            URL of the audio file.
+   406→        track_type : str
+   407→            "uploaded-audio" (default) or "library-music".
+   408→        linked_item_id : str, optional
+   409→            If this audio is linked to a video clip (e.g., lip sync audio),
+   410→            pass the video clip ID and ``link_type="video-audio"``.
+   411→        """
+   412→        if source_duration is None:
+   413→            source_duration = duration
+   414→
+   415→        track = self.get_track(track_id) if track_id else None
+   416→        if track is None:
+   417→            track = self.add_track(track_type, label=track_label or "Audio", track_id=track_id)
+   418→
+   419→        clip = {
+   420→            "id": _new_id("audio"),
+   421→            "trackId": track["id"],
+   422→            "name": name or "Audio clip",
+   423→            "src": src,
+   424→            "start": float(start),
+   425→            "duration": float(duration),
+   426→            "sourceDuration": float(source_duration),
+   427→            "trimStart": float(trim_start),
+   428→            "trimEnd": float(trim_end),
+   429→            "volume": float(volume),
+   430→            "fadeIn": float(fade_in),
+   431→            "fadeOut": float(fade_out),
+   432→        }
+   433→        if linked_item_id:
+   434→            clip["linkedItemId"] = linked_item_id
+   435→        if link_type:
+   436→            clip["linkType"] = link_type
+   437→
+   438→        track["items"].append(clip)
+   439→        end = clip["start"] + clip["duration"]
+   440→        if end > self.duration:
+   441→            self.duration = end
+   442→        return clip
+   443→
+   444→    def add_text_overlay(
+   445→        self,
+   446→        *,
+   447→        text: str,
+   448→        start: float,
+   449→        end: float,
+   450→        preset: Optional[str] = None,
+   451→        font_size: int = 48,
+   452→        color: str = "#FFFFFF",
+   453→        position: str = "center",
+   454→        track_id: Optional[str] = None,
+   455→        clip_id: Optional[str] = None,
+   456→    ) -> Dict[str, Any]:
+   457→        """Add a text overlay to the timeline.
+   458→
+   459→        Parameters
+   460→        ----------
+   461→        text : str
+   462→            Text content.
+   463→        start, end : float
+   464→            Start and end times in seconds.
+   465→        preset : str, optional
+   466→            Effect preset: "fade", "slide-up", "surround", "strange", "flash",
+   467→            "slide", "cinefade", "glow", "typewriter", "highlight", "glitch".
+   468→        font_size : int
+   469→            Font size in pixels (default 48).
+   470→        color : str
+   471→            Hex color (e.g., "#FF0000").
+   472→        position : str
+   473→            "center" (default), "top", "bottom", "left", "right", "top-left",
+   474→            "top-right", "bottom-left", "bottom-right".
+   475→        """
+   476→        duration = float(end) - float(start)
+   477→        if duration <= 0:
+   478→            raise ValueError(f"end ({end}) must be greater than start ({start})")
+   479→
+   480→        track = self.get_track(track_id) if track_id else self.text_track
+   481→        if track is None:
+   482→            track = self.add_track("text", label="Text", track_id=track_id)
+   483→
+   484→        clip = {
+   485→            "id": clip_id or _new_id("text"),
+   486→            "trackId": track["id"],
+   487→            "text": text,
+   488→            "start": float(start),
+   489→            "duration": duration,
+   490→            "fontSize": int(font_size),
+   491→            "color": color,
+   492→            "position": position,
+   493→        }
+   494→        if preset:
+   495→            clip["preset"] = preset
+   496→
+   497→        track["items"].append(clip)
+   498→        end_t = clip["start"] + clip["duration"]
+   499→        if end_t > self.duration:
+   500→            self.duration = end_t
+   501→        return clip
+   502→
+   503→    # ---- Clip editing ----
+   504→    def resize_clip(self, *, clip_id: str, new_duration: float,
+   505→                    clip_name: Optional[str] = None) -> bool:
+   506→        """Set the ABSOLUTE duration of a clip.
+   507→
+   508→        ``new_duration`` is the final duration (not a delta).
+   509→        Cannot exceed the clip's ``sourceDuration`` (maxDur).
+   510→        """
+   511→        _, clip = self.find_clip(clip_id)
+   512→        if clip is None and clip_name:
+   513→            _, clip = self.find_clip_by_name(clip_name)
+   514→        if clip is None:
+   515→            return False
+   516→        max_dur = clip.get("sourceDuration", float("inf"))
+   517→        if new_duration > max_dur:
+   518→            new_duration = max_dur
+   519→        clip["duration"] = float(new_duration)
+   520→        return True
+   521→
+   522→    def move_clip(self, *, clip_id: str, start_time: float,
+   523→                  clip_name: Optional[str] = None) -> bool:
+   524→        """Move a clip to a new start time on its track."""
+   525→        _, clip = self.find_clip(clip_id)
+   526→        if clip is None and clip_name:
+   527→            _, clip = self.find_clip_by_name(clip_name)
+   528→        if clip is None:
+   529→            return False
+   530→        clip["start"] = float(start_time)
+   531→        # Extend timeline if needed
+   532→        end = clip["start"] + clip["duration"]
+   533→        if end > self.duration:
+   534→            self.duration = end
+   535→        return True
+   536→
+   537→    def split_clip(self, *, clip_id: str, at_time: float,
+   538→                   clip_name: Optional[str] = None) -> Optional[str]:
+   539→        """Split a clip at ``at_time`` (absolute timeline time).
+   540→
+   541→        Returns the new (second) clip's ID, or None if split failed.
+   542→        """
+   543→        track, clip = self.find_clip(clip_id)
+   544→        if clip is None and clip_name:
+   545→            track, clip = self.find_clip_by_name(clip_name)
+   546→        if clip is None or track is None:
+   547→            return None
+   548→
+   549→        clip_start = clip.get("start", 0)
+   550→        clip_duration = clip.get("duration", 0)
+   551→        clip_end = clip_start + clip_duration
+   552→
+   553→        # Validate split time is within the clip
+   554→        if at_time <= clip_start or at_time >= clip_end:
+   555→            return None
+   556→
+   557→        # Calculate new durations
+   558→        first_duration = at_time - clip_start
+   559→        second_duration = clip_end - at_time
+   560→
+   561→        # Update the original clip's duration
+   562→        clip["duration"] = float(first_duration)
+   563→
+   564→        # Create the new (second) clip
+   565→        new_clip = copy.deepcopy(clip)
+   566→        new_clip["id"] = _new_id("clip")
+   567→        new_clip["start"] = float(at_time)
+   568→        new_clip["duration"] = float(second_duration)
+   569→        # Adjust trimStart if it's a video/audio clip
+   570→        if "trimStart" in clip:
+   571→            new_clip["trimStart"] = float(clip.get("trimStart", 0)) + first_duration
+   572→
+   573→        track["items"].append(new_clip)
+   574→        # Re-sort items by start time
+   575→        track["items"].sort(key=lambda x: x.get("start", 0))
+   576→        return new_clip["id"]
+   577→
+   578→    def duplicate_clip(self, *, clip_id: str,
+   579→                       clip_name: Optional[str] = None) -> Optional[str]:
+   580→        """Duplicate a clip in place on the same track.
+   581→
+   582→        Returns the new clip's ID, or None if not found.
+   583→        """
+   584→        track, clip = self.find_clip(clip_id)
+   585→        if clip is None and clip_name:
+   586→            track, clip = self.find_clip_by_name(clip_name)
+   587→        if clip is None or track is None:
+   588→            return None
+   589→
+   590→        new_clip = copy.deepcopy(clip)
+   591→        new_clip["id"] = _new_id("clip")
+   592→        # Place the duplicate right after the original
+   593→        new_clip["start"] = clip.get("start", 0) + clip.get("duration", 0)
+   594→        track["items"].append(new_clip)
+   595→        # Extend timeline duration
+   596→        end = new_clip["start"] + new_clip["duration"]
+   597→        if end > self.duration:
+   598→            self.duration = end
+   599→        return new_clip["id"]
+   600→
+   601→    def delete_clip(self, *, clip_id: str,
+   602→                    clip_name: Optional[str] = None) -> bool:
+   603→        """Delete a clip by ID (or name fallback). Returns True if deleted."""
+   604→        track, clip = self.find_clip(clip_id)
+   605→        if clip is None and clip_name:
+   606→            track, clip = self.find_clip_by_name(clip_name)
+   607→        if clip is None or track is None:
+   608→            return False
+   609→        track["items"] = [c for c in track["items"] if c.get("id") != clip["id"]]
+   610→        return True
+   611→
+   612→    def reorder_clips(self, *, ordered_clip_ids: Optional[List[str]] = None,
+   613→                      clip_id: Optional[str] = None,
+   614→                      to_index: Optional[int] = None) -> bool:
+   615→        """Reorder clips on the video track.
+   616→
+   617→        Two modes:
+   618→        1. Pass ``ordered_clip_ids`` (preferred) — list ALL video clip IDs
+   619→           in the desired final order. Single call.
+   620→        2. Pass ``clip_id`` + ``to_index`` — move a single clip to a 0-based index.
+   621→        """
+   622→        track = self.video_track
+   623→        if track is None:
+   624→            return False
+   625→
+   626→        if ordered_clip_ids is not None:
+   627→            # Reorder by the given list
+   628→            by_id = {c["id"]: c for c in track["items"]}
+   629→            new_items = []
+   630→            for cid in ordered_clip_ids:
+   631→                if cid in by_id:
+   632→                    new_items.append(by_id[cid])
+   633→            # Append any clips not in the list at the end (preserve their relative order)
+   634→            for c in track["items"]:
+   635→                if c["id"] not in ordered_clip_ids:
+   636→                    new_items.append(c)
+   637→            track["items"] = new_items
+   638→            return True
+   639→        elif clip_id is not None and to_index is not None:
+   640→            items = track["items"]
+   641→            idx = next((i for i, c in enumerate(items) if c["id"] == clip_id), None)
+   642→            if idx is None:
+   643→                return False
+   644→            item = items.pop(idx)
+   645→            items.insert(to_index, item)
+   646→            return True
+   647→        return False
+   648→
+   649→    def extend_timeline_to(self, target_duration: float) -> bool:
+   650→        """Extend or shrink the entire video track to a target total duration.
+   651→
+   652→        The system handles clip math precisely. If the target is longer,
+   653→        the last clip is extended (up to its maxDur). If shorter, clips
+   654→        are trimmed from the end.
+   655→        """
+   656→        if target_duration <= 0:
+   657→            return False
+   658→
+   659→        current = self.total_video_duration
+   660→        if current == 0:
+   661→            self.duration = float(target_duration)
+   662→            return True
+   663→
+   664→        diff = target_duration - current
+   665→        if diff > 0:
+   666→            # Extend: add the diff to the last video clip (if it has room)
+   667→            track = self.video_track
+   668→            if track and track["items"]:
+   669→                last = max(track["items"], key=lambda c: c.get("start", 0))
+   670→                max_dur = last.get("sourceDuration", float("inf"))
+   671→                new_duration = last["duration"] + diff
+   672→                if new_duration > max_dur:
+   673→                    new_duration = max_dur
+   674→                last["duration"] = float(new_duration)
+   675→        elif diff < 0:
+   676→            # Shrink: trim clips from the end
+   677→            track = self.video_track
+   678→            if track:
+   679→                # Sort by start time, then trim from the end
+   680→                items = sorted(track["items"], key=lambda c: c.get("start", 0))
+   681→                remaining = target_duration
+   682→                for item in items:
+   683→                    clip_end = item["start"] + item["duration"]
+   684→                    if item["start"] >= target_duration:
+   685→                        # Clip starts after target — remove entirely
+   686→                        item["duration"] = 0
+   687→                    elif clip_end > target_duration:
+   688→                        # Clip straddles the target — trim it
+   689→                        item["duration"] = target_duration - item["start"]
+   690→                # Remove zero-duration clips
+   691→                track["items"] = [c for c in track["items"] if c.get("duration", 0) > 0]
+   692→
+   693→        self.duration = float(target_duration)
+   694→        return True
+   695→
+   696→    # ---- Effects / properties ----
+   697→    def set_fade(self, *, clip_id: str, fade_in: float = 0.0, fade_out: float = 0.0,
+   698→                 clip_name: Optional[str] = None) -> bool:
+   699→        """Set fade-in and/or fade-out on a clip.
+   700→
+   701→        Typical values: 0.3-1.0s. Must not exceed half the clip duration.
+   702→        """
+   703→        _, clip = self.find_clip(clip_id)
+   704→        if clip is None and clip_name:
+   705→            _, clip = self.find_clip_by_name(clip_name)
+   706→        if clip is None:
+   707→            return False
+   708→        half = clip.get("duration", 0) / 2
+   709→        clip["fadeIn"] = float(min(fade_in, half))
+   710→        clip["fadeOut"] = float(min(fade_out, half))
+   711→        return True
+   712→
+   713→    def set_volume(self, *, track_id: str, volume: float) -> bool:
+   714→        """Set the volume of a track from 0.0 (silent) to 1.0 (full)."""
+   715→        track = self.get_track(track_id)
+   716→        if track is None:
+   717→            return False
+   718→        for c in track.get("items", []):
+   719→            c["volume"] = float(max(0.0, min(1.0, volume)))
+   720→        return True
+   721→
+   722→    def set_speed(self, *, clip_id: str, speed: float,
+   723→                  clip_name: Optional[str] = None) -> bool:
+   724→        """Set playback speed of a clip (0.1 to 10.0).
+   725→
+   726→        Increasing speed makes the clip SHORTER on the timeline;
+   727→        decreasing makes it LONGER.
+   728→        """
+   729→        if speed < 0.1 or speed > 10.0:
+   730→            return False
+   731→        _, clip = self.find_clip(clip_id)
+   732→        if clip is None and clip_name:
+   733→            _, clip = self.find_clip_by_name(clip_name)
+   734→        if clip is None:
+   735→            return False
+   736→        old_speed = clip.get("speed", 1.0)
+   737→        old_duration = clip.get("duration", 0)
+   738→        # New duration = old_duration * (old_speed / new_speed)
+   739→        # (faster speed → shorter clip)
+   740→        new_duration = old_duration * (old_speed / speed)
+   741→        clip["speed"] = float(speed)
+   742→        clip["duration"] = float(new_duration)
+   743→        return True
+   744→
+   745→    # ---- Text overlay editing ----
+   746→    def update_text_overlay(
+   747→        self,
+   748→        *,
+   749→        clip_id: str,
+   750→        text: Optional[str] = None,
+   751→        preset: Optional[str] = None,
+   752→        font_size: Optional[int] = None,
+   753→        color: Optional[str] = None,
+   754→        position: Optional[str] = None,
+   755→        clip_name: Optional[str] = None,
+   756→    ) -> bool:
+   757→        """Update an existing text overlay. Only set fields are updated."""
+   758→        _, clip = self.find_clip(clip_id)
+   759→        if clip is None and clip_name:
+   760→            _, clip = self.find_clip_by_name(clip_name)
+   761→        if clip is None:
+   762→            return False
+   763→        if text is not None:
+   764→            clip["text"] = text
+   765→        if preset is not None:
+   766→            clip["preset"] = preset
+   767→        if font_size is not None:
+   768→            clip["fontSize"] = int(font_size)
+   769→        if color is not None:
+   770→            clip["color"] = color
+   771→        if position is not None:
+   772→            clip["position"] = position
+   773→        return True
+   774→
+   775→    # ---- Audio linking ----
+   776→    def unlink_audio_from_video(self, *, audio_clip_id: str) -> bool:
+   777→        """Unlink an audio clip from its associated video clip."""
+   778→        _, clip = self.find_clip(audio_clip_id)
+   779→        if clip is None:
+   780→            return False
+   781→        clip.pop("linkedItemId", None)
+   782→        clip.pop("linkType", None)
+   783→        return True
+   784→
+   785→    def link_audio_to_video(self, *, audio_clip_id: str, video_clip_id: str,
+   786→                            link_type: str = "video-audio") -> bool:
+   787→        """Link an audio clip to a video clip (e.g., lip sync audio)."""
+   788→        _, audio_clip = self.find_clip(audio_clip_id)
+   789→        if audio_clip is None:
+   790→            return False
+   791→        audio_clip["linkedItemId"] = video_clip_id
+   792→        audio_clip["linkType"] = link_type
+   793→        return True
+   794→
+   795→    def slip_audio(self, *, clip_id: str, slip_seconds: float) -> bool:
+   796→        """Slip an audio clip's trim point without changing its timeline position.
+   797→
+   798→        ``slip_seconds`` shifts the in-point forward (positive) or backward (negative).
+   799→        """
+   800→        _, clip = self.find_clip(clip_id)
+   801→        if clip is None:
+   802→            return False
+   803→        clip["trimStart"] = float(max(0, clip.get("trimStart", 0) + slip_seconds))
+   804→        return True
+   805→
+   806→    def replace_audio(self, *, clip_id: str, new_src: str,
+   807→                      new_duration: Optional[float] = None) -> bool:
+   808→        """Replace the audio source URL of an audio clip."""
+   809→        _, clip = self.find_clip(clip_id)
+   810→        if clip is None:
+   811→            return False
+   812→        clip["src"] = new_src
+   813→        if new_duration is not None:
+   814→            clip["duration"] = float(new_duration)
+   815→            clip["sourceDuration"] = float(new_duration)
+   816→        return True
+   817→
+   818→    # ---- Bulk operations ----
+   819→    def delete_all_clips(self) -> None:
+   820→        """Remove every clip from every track (keeps the track structure)."""
+   821→        for t in self.tracks:
+   822→            t["items"] = []
+   823→        self.duration = 0.0
+   824→
+   825→    def delete_timeline(self) -> None:
+   826→        """Remove all tracks AND clips (full reset)."""
+   827→        self._data["tracks"] = []
+   828→        self.duration = 0.0
+   829→
+   830→    # ---- Summary ----
+   831→    def summary(self) -> Dict[str, Any]:
+   832→        """Return a brief summary of the composition."""
+   833→        track_summaries = []
+   834→        for t in self.tracks:
+   835→            track_summaries.append({
+   836→                "id": t["id"],
+   837→                "type": t.get("type"),
+   838→                "label": t.get("label"),
+   839→                "item_count": len(t.get("items", [])),
+   840→                "duration": sum(c.get("duration", 0) for c in t.get("items", [])),
+   841→            })
+   842→        return {
+   843→            "duration": self.duration,
+   844→            "track_count": len(self.tracks),
+   845→            "total_clips": sum(len(t.get("items", [])) for t in self.tracks),
+   846→            "tracks": track_summaries,
+   847→        }
+   848→
+   849→    def __repr__(self) -> str:
+   850→        s = self.summary()
+   851→        return (f"<Composition duration={s['duration']:.1f}s "
+   852→                f"tracks={s['track_count']} clips={s['total_clips']}>")
+   853→
