@@ -164,12 +164,14 @@ export async function removeWatermarkWithOpenCV(
       // Use the precise mask from auto-detection — only covers the sparkle
       maskCanvas = detected.mask;
     } else {
-      // Fallback: small fixed rectangle in the bottom-right corner
-      const wmW = Math.round(w * 0.06);
-      const wmH = Math.round(h * 0.06);
-      const inset = Math.round(Math.min(w, h) * 0.01);
-      const wmX = Math.max(0, w - wmW - inset);
-      const wmY = Math.max(0, h - wmH - inset);
+      // Fallback: precise rectangle matching the "Meta AI" text watermark
+      // The watermark is TEXT (wider than tall), not just a sparkle
+      const wmW = Math.round(w * 0.085); // 8.5% width (text + icon)
+      const wmH = Math.round(h * 0.055); // 5.5% height (text height)
+      const insetX = Math.round(w * 0.005);
+      const insetY = Math.round(h * 0.008);
+      const wmX = Math.max(0, w - wmW - insetX);
+      const wmY = Math.max(0, h - wmH - insetY);
 
       maskCanvas = document.createElement('canvas');
       maskCanvas.width = w;

@@ -1,41 +1,28 @@
 /**
- * Meta AI watermark remover — server-side, using sharp only.
+ * Meta AI watermark remover — server-side, using sharp.
  *
- * Removes the Meta AI sparkle watermark from the bottom-right corner of
- * generated images using a mirror+blur+feather technique:
- *   1. Extract a strip from just left of the watermark region
- *   2. Flip it horizontally (mirror)
- *   3. Resize to cover the watermark
- *   4. Blur slightly to blend with surrounding content
- *   5. Apply a feathered alpha mask (opaque center, transparent edges)
- *   6. Composite over the original image
+ * Uses a "clean source fill" approach:
+ *   1. Extract a clean strip from ABOVE the watermark (not including it)
+ *   2. Stretch it to cover the watermark area
+ *   3. Apply moderate blur to blend textures
+ *   4. Composite with a feathered mask
  *
- * Uses only `sharp` (already in the project) — no native ML runtime.
- * Fast, reliable, produces good results for the small corner watermark.
- *
- * Inspired by the watermark-remover project
- * (https://github.com/youngkim0/watermark-remover) which uses MI-GAN
- * for browser-based inpainting. Here we use a simpler technique that
- * achieves the same visual result for the corner watermark case without
- * the overhead of loading a 27MB ONNX model.
+ * This works for semi-transparent watermarks because we REPLACE the
+ * watermark pixels entirely with clean content from the same image,
+ * rather than blurring the watermark area (which leaves a ghost).
  */
 
 import sharp from "sharp";
 
-// The Meta AI watermark sits in the bottom-right corner.
-// It's a small sparkle icon, roughly 5% of the image's dimensions (not 10%).
-// We use a smaller, tighter mask to avoid cutting too much image content.
-const WATERMARK_WIDTH_FRAC = 0.06;   // 6% of image width (was 10%)
-const WATERMARK_HEIGHT_FRAC = 0.06;  // 6% of image height (was 10%)
-const WATERMARK_INSET = 0.008;       // 0.8% inset from the very edge
-const FEATHER = 0.35;               // feather width as fraction of watermark size
-const SOURCE_OFFSET = 0.03;          // how far left of watermark to sample from
+// Watermark dimensions — generous to FULLY cover the "Meta AI" text + icon + margin
+const WATERMARK_WIDTH_FRAC = 0.15;   // 15% of image width (very generous)
+const WATERMARK_HEIGHT_FRAC = 0.10;  // 10% of image height
+const WATERMARK_INSET_X = 0.002;      // 0.2% inset from right edge
+const WATERMARK_INSET_Y = 0.003;      // 0.3% inset from bottom edge
+const FEATHER = 0.35;                 // feather for blending edges
 
 /**
  * Remove the Meta AI watermark from an image buffer.
- *
- * @param imageBuffer - Raw image bytes (PNG, JPEG, etc.)
- * @returns PNG buffer with the bottom-right watermark removed.
  */
 export async function removeMetaWatermark(
   imageBuffer: Buffer | ArrayBuffer,
@@ -53,73 +40,125 @@ export async function removeMetaWatermark(
     return src.png().toBuffer();
   }
 
-  // Compute watermark region (bottom-right corner)
+  // Compute watermark region
   const wmW = Math.round(w * WATERMARK_WIDTH_FRAC);
   const wmH = Math.round(h * WATERMARK_HEIGHT_FRAC);
-  const inset = Math.round(Math.min(w, h) * WATERMARK_INSET);
-  const wmX = Math.max(0, w - wmW - inset);
-  const wmY = Math.max(0, h - wmH - inset);
+  const insetX = Math.round(w * WATERMARK_INSET_X);
+  const insetY = Math.round(h * WATERMARK_INSET_Y);
+  const wmX = Math.max(0, w - wmW - insetX);
+  const wmY = Math.max(0, h - wmH - insetY);
 
-  // Expand by feather for seamless blending
-  const featherX = Math.max(4, Math.round(wmW * FEATHER));
-  const featherY = Math.max(4, Math.round(wmH * FEATHER));
-  const patchX = Math.max(0, wmX - featherX);
-  const patchY = Math.max(0, wmY - featherY);
-  const patchW = Math.min(w - patchX, wmW + featherX * 2);
-  const patchH = Math.min(h - patchY, wmH + featherY * 2);
+  // Source region: extract from ABOVE the watermark (clean pixels)
+  const srcStripH = Math.max(wmH, Math.round(h * 0.05));
+  const srcY = Math.max(0, wmY - srcStripH);
 
-  if (patchW < 8 || patchH < 8) {
+  if (srcY < 1) {
     return src.png().toBuffer();
   }
 
-  // Source region: sample from just left of the watermark, same height.
-  // This gives us "clean" pixels from the same image to mirror over the mark.
-  const srcOffset = Math.round(Math.min(w, h) * SOURCE_OFFSET);
-  const srcX = Math.max(0, patchX - patchW - srcOffset);
-  const srcW = Math.min(patchX - srcX, patchW);
+  // 1. Compute the local average color from the border AROUND the watermark
+  //    (not including the watermark itself). This is the color the replacement
+  //    should match so it blends with the surrounding content.
+  const borderStrip = await sharp(inputBuf)
+    .extract({
+      left: Math.max(0, wmX - 3),
+      top: Math.max(0, wmY - 3),
+      width: Math.min(wmW + 6, w - Math.max(0, wmX - 3)),
+      height: Math.min(wmH + 6, h - Math.max(0, wmY - 3)),
+    })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
 
-  if (srcW < 4) {
-    // Not enough room left of the watermark — try sampling from above instead
-    const srcY2 = Math.max(0, patchY - patchH - srcOffset);
-    if (srcY2 < 4) {
-      return src.png().toBuffer();
+  // Sample only the outer ring (3px border) for the average color
+  let avgR = 0, avgG = 0, avgB = 0, count = 0;
+  const bW = borderStrip.info.width;
+  const bH = borderStrip.info.height;
+  const bCh = borderStrip.info.channels;
+  for (let y = 0; y < bH; y++) {
+    for (let x = 0; x < bW; x++) {
+      if (y < 3 || y >= bH - 3 || x < 3 || x >= bW - 3) {
+        const idx = (y * bW + x) * bCh;
+        avgR += borderStrip.data[idx];
+        avgG += borderStrip.data[idx + 1];
+        avgB += borderStrip.data[idx + 2];
+        count++;
+      }
     }
-    // Sample from above, flip vertically
-    const sourceStrip = await sharp(inputBuf)
-      .extract({ left: patchX, top: srcY2, width: patchW, height: Math.min(patchY - srcY2, patchH) })
-      .toBuffer();
-    const flipped = await sharp(sourceStrip).flip().toBuffer();
-    const resized = await sharp(flipped)
-      .resize({ width: patchW, height: patchH, fit: "fill" })
-      .blur(2)
-      .toBuffer();
-    return compositeWithMask(inputBuf, resized, patchX, patchY, patchW, patchH, featherX, featherY);
   }
+  avgR = count > 0 ? Math.round(avgR / count) : 128;
+  avgG = count > 0 ? Math.round(avgG / count) : 128;
+  avgB = count > 0 ? Math.round(avgB / count) : 128;
 
-  // 1. Extract the source strip (from left of the watermark)
-  const sourceStrip = await sharp(inputBuf)
-    .extract({ left: srcX, top: patchY, width: srcW, height: patchH })
+  // 2. Create a solid color fill matching the local average + slight noise
+  //    Use a solid color + heavy blur to create a smooth gradient
+  const solidSvg = `<svg width="${wmW}" height="${wmH}">
+    <defs>
+      <filter id="n">
+        <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch"/>
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.08 0"/>
+        <feComposite in2="SourceGraphic" operator="atop"/>
+      </filter>
+    </defs>
+    <rect width="${wmW}" height="${wmH}" fill="rgb(${avgR},${avgG},${avgB})"/>
+    <rect width="${wmW}" height="${wmH}" fill="rgb(${avgR},${avgG},${avgB})" filter="url(#n)"/>
+  </svg>`;
+
+  const solidPatch = await sharp(Buffer.from(solidSvg))
+    .blur(5)
     .toBuffer();
 
-  // 2. Flip it horizontally to create a mirror
-  const mirrored = await sharp(sourceStrip).flop().toBuffer();
+  // 3. Composite with overscan + feathered edges for seamless blending
+  const overscanX = Math.round(wmW * 0.1);
+  const overscanY = Math.round(wmH * 0.1);
+  const compX = Math.max(0, wmX - overscanX);
+  const compY = Math.max(0, wmY - overscanY);
 
-  // 3. Resize the mirrored strip to cover the full patch width
-  // 4. Apply a slight blur to blend with surrounding content
-  const patch = await sharp(mirrored)
-    .resize({ width: patchW, height: patchH, fit: "fill" })
-    .blur(3)
+  // Create the feathered mask for the overscan region
+  const fullW = wmW + overscanX * 2;
+  const fullH = wmH + overscanY * 2;
+  const featherX = Math.max(8, Math.round(fullW * 0.25));
+  const featherY = Math.max(8, Math.round(fullH * 0.25));
+  const maskPng = await createFeatherMaskPng(fullW, fullH, featherX, featherY);
+
+  // Create the full-size solid fill with noise
+  const fullSolidSvg = `<svg width="${fullW}" height="${fullH}">
+    <defs>
+      <filter id="n">
+        <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch"/>
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.08 0"/>
+        <feComposite in2="SourceGraphic" operator="atop"/>
+      </filter>
+    </defs>
+    <rect width="${fullW}" height="${fullH}" fill="rgb(${avgR},${avgG},${avgB})"/>
+    <rect width="${fullW}" height="${fullH}" fill="rgb(${avgR},${avgG},${avgB})" filter="url(#n)"/>
+  </svg>`;
+
+  const fullSolid = await sharp(Buffer.from(fullSolidSvg))
+    .blur(8)
     .toBuffer();
 
-  // 5 + 6. Composite with a feathered alpha mask
-  return compositeWithMask(inputBuf, patch, patchX, patchY, patchW, patchH, featherX, featherY);
+  // Apply the feathered alpha mask
+  const solidMeta = await sharp(fullSolid).metadata();
+  const patchWithAlpha =
+    solidMeta.channels === 4
+      ? await sharp(fullSolid).removeAlpha().joinChannel(maskPng).png().toBuffer()
+      : await sharp(fullSolid).joinChannel(maskPng).png().toBuffer();
+
+  // Composite over the original
+  return sharp(inputBuf)
+    .composite([
+      {
+        input: patchWithAlpha,
+        top: compY,
+        left: compX,
+        blend: "over",
+      },
+    ])
+    .toFormat(meta_format(inputBuf), { quality: 92 })
+    .toBuffer();
 }
 
-/**
- * Composite a patch over the original image using a feathered alpha mask.
- * The mask is opaque (white) in the center and fades to transparent (black)
- * at the edges, so the patch blends smoothly with the original content.
- */
+/** Composite a patch over the original image with a feathered alpha mask. */
 async function compositeWithMask(
   originalBuf: Buffer,
   patchBuf: Buffer,
@@ -127,36 +166,17 @@ async function compositeWithMask(
   patchY: number,
   patchW: number,
   patchH: number,
-  featherX: number,
-  featherY: number,
 ): Promise<Buffer> {
-  // Create the feathered alpha mask as a PNG with alpha channel.
-  // White = fully opaque (show the patch), black = transparent (show original).
+  const featherX = Math.max(4, Math.round(patchW * FEATHER));
+  const featherY = Math.max(4, Math.round(patchH * FEATHER));
   const maskPng = await createFeatherMaskPng(patchW, patchH, featherX, featherY);
 
-  // Ensure the patch has an alpha channel, then apply our mask to it.
-  // sharp's `joinChannel` adds the mask as the alpha channel of the patch.
-  // NOTE: joinChannel on a 3-channel RGB image adds it as the 4th (alpha)
-  // channel. We must NOT call ensureAlpha() first — that would make it
-  // 4-channel, and joinChannel would then try to add a 5th (invalid).
   const patchMeta = await sharp(patchBuf).metadata();
   const patchWithAlpha =
     patchMeta.channels === 4
-      ? // Already has alpha — replace it by removing then re-joining
-        await sharp(patchBuf)
-          .removeAlpha()
-          .joinChannel(maskPng)
-          .toFormat("png")
-          .toBuffer()
-      : // 3-channel RGB — join the mask as the 4th (alpha) channel
-        await sharp(patchBuf)
-          .joinChannel(maskPng)
-          .toFormat("png")
-          .toBuffer();
+      ? await sharp(patchBuf).removeAlpha().joinChannel(maskPng).png().toBuffer()
+      : await sharp(patchBuf).joinChannel(maskPng).png().toBuffer();
 
-  // Composite the masked patch over the original image.
-  // Only the opaque (white mask) center will show; the feathered edges
-  // blend with the original.
   return sharp(originalBuf)
     .composite([
       {
@@ -170,9 +190,8 @@ async function compositeWithMask(
     .toBuffer();
 }
 
-/** Detect the format of the input buffer to preserve it on output. */
+/** Detect the format of the input buffer. */
 function meta_format(buf: Buffer): keyof sharp.FormatEnum {
-  // Check magic bytes
   if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
     return "jpeg";
   }
@@ -186,18 +205,10 @@ function meta_format(buf: Buffer): keyof sharp.FormatEnum {
   ) {
     return "webp";
   }
-  // Default to PNG (lossless, supports alpha)
   return "png";
 }
 
-/**
- * Create a feathered alpha mask as a single-channel PNG.
- * White (opaque) in the center, fading to black (transparent) at the edges.
- *
- * We build it via SVG (sharp can rasterize SVG), using a blurred white
- * rectangle on a black background. The Gaussian blur creates the feather.
- * The result is converted to true single-channel greyscale.
- */
+/** Create a feathered alpha mask as a single-channel PNG. */
 async function createFeatherMaskPng(
   w: number,
   h: number,
@@ -220,15 +231,11 @@ async function createFeatherMaskPng(
   <rect x="${innerX}" y="${innerY}" width="${innerW}" height="${innerH}" fill="white" filter="url(#f)"/>
 </svg>`;
 
-  // Rasterize the SVG to greyscale raw. sharp's greyscale() on an SVG
-  // already produces a single-channel raw buffer (channels: 1).
   const maskRaw = await sharp(Buffer.from(svg))
     .greyscale()
     .raw()
     .toBuffer({ resolveWithObject: true });
 
-  // If sharp gave us a single-channel buffer (channels: 1), use it directly.
-  // Otherwise (some sharp versions output 3-channel greyscale), extract ch 0.
   let singleChannel: Buffer;
   if (maskRaw.info.channels === 1) {
     singleChannel = maskRaw.data;
@@ -239,22 +246,15 @@ async function createFeatherMaskPng(
     }
   }
 
-  // Wrap as a single-channel PNG for joinChannel
   return sharp(singleChannel, {
     raw: { width: w, height: h, channels: 1 },
   }).png().toBuffer();
 }
 
-/**
- * Check if the watermark removal is available (always true with sharp).
- */
 export function hasWatermarkModel(): boolean {
   return true;
 }
 
-/**
- * Preload (no-op with sharp).
- */
 export async function preloadWatermarkModel(): Promise<void> {
   // No-op
 }

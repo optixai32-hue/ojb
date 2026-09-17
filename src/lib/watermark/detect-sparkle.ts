@@ -22,14 +22,14 @@ export interface DetectedWatermark {
 }
 
 /** Search region: bottom-right corner of the image. */
-const SEARCH_FRAC = 0.20; // search in last 20% of width + height
-/** Sparkle size as fraction of min(imageW, imageH). */
-const SPARKLE_MIN = 0.02; // 2% min
-const SPARKLE_MAX = 0.10; // 10% max
-/** Brightness threshold above local average (sparkle is white). */
-const BRIGHTNESS_DELTA = 15;
-/** Luminance threshold (sparkle is bright white). */
-const MIN_LUMINANCE = 180;
+const SEARCH_FRAC = 0.15; // search in last 15% of width + height
+/** Watermark size as fraction of image dimensions. */
+const WM_WIDTH_FRAC = 0.085;  // 8.5% of image width (text "Meta AI" + icon)
+const WM_HEIGHT_FRAC = 0.055; // 5.5% of image height
+/** Brightness threshold above local average (watermark is semi-transparent white). */
+const BRIGHTNESS_DELTA = 8;  // lowered from 15 — watermark is subtle
+/** Luminance threshold (watermark is light, but not always pure white). */
+const MIN_LUMINANCE = 100;  // lowered from 180 — watermark is semi-transparent
 
 /**
  * Detect the Meta AI sparkle watermark in the bottom-right corner.
@@ -74,7 +74,7 @@ export function detectSparkle(canvas: HTMLCanvasElement): {
   }
 
   // 3. Compute local average (box blur, radius ~ sparkle size / 4)
-  const sparkleMaxPx = Math.round(Math.min(W, H) * SPARKLE_MAX);
+  const sparkleMaxPx = Math.round(Math.max(W, H) * WM_WIDTH_FRAC);
   const blurR = Math.max(5, Math.round(sparkleMaxPx / 4));
   const localAvg = boxBlur(luma, searchW, searchH, blurR);
 
@@ -127,15 +127,17 @@ export function detectSparkle(canvas: HTMLCanvasElement): {
       // Filter by expected size
       const clusterW = maxX - minX + 1;
       const clusterH = maxY - minY + 1;
-      const minSparklePx = Math.round(Math.min(W, H) * SPARKLE_MIN);
-      const maxSparklePx = Math.round(Math.min(W, H) * SPARKLE_MAX);
+      const minWmPx = Math.round(W * WM_WIDTH_FRAC * 0.2);
+      const maxWmPx = Math.round(W * WM_WIDTH_FRAC * 1.5);
+      const minHmPx = Math.round(H * WM_HEIGHT_FRAC * 0.2);
+      const maxHmPx = Math.round(H * WM_HEIGHT_FRAC * 1.5);
 
       if (
         size >= 4 &&
-        clusterW >= minSparklePx * 0.3 &&
-        clusterW <= maxSparklePx &&
-        clusterH >= minSparklePx * 0.3 &&
-        clusterH <= maxSparklePx &&
+        clusterW >= minWmPx &&
+        clusterW <= maxWmPx &&
+        clusterH >= minHmPx &&
+        clusterH <= maxHmPx &&
         (!bestCluster || size > bestCluster.size)
       ) {
         bestCluster = {
