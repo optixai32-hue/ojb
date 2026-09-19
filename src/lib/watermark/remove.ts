@@ -1,16 +1,38 @@
 /**
- * Meta AI watermark remover — TEXT COVER approach.
+ * Meta AI watermark remover — PNG LOGO overlay.
  *
- * Covers the Meta AI watermark with a styled "Nelth-AI" text overlay.
- * Fully opaque background ensures Meta AI is completely hidden.
+ * Uses a pre-generated "Nelth-AI" PNG logo to cover the Meta AI watermark.
+ * This works on Vercel because it doesn't rely on SVG text rendering
+ * (which requires librsvg, not available in Vercel's serverless environment).
+ *
+ * The PNG logo is loaded from public/nelth-ai-logo.png and resized
+ * to match the watermark area, then composited over it.
  */
 
 import sharp from "sharp";
+import path from "path";
+import fs from "fs";
 
-const WM_WIDTH_FRAC = 0.26;
-const WM_HEIGHT_FRAC = 0.11;
+const WM_WIDTH_FRAC = 0.22;
+const WM_HEIGHT_FRAC = 0.10;
 const WM_INSET_X = 0.003;
 const WM_INSET_Y = 0.003;
+
+// Path to the pre-generated Nelth-AI logo
+const LOGO_PATH = path.join(process.cwd(), "public", "nelth-ai-logo.png");
+
+// Cache the logo buffer
+let logoBuffer: Buffer | null = null;
+
+function getLogoBuffer(): Buffer | null {
+  if (logoBuffer) return logoBuffer;
+  try {
+    logoBuffer = fs.readFileSync(LOGO_PATH);
+    return logoBuffer;
+  } catch {
+    return null;
+  }
+}
 
 export async function removeMetaWatermark(
   imageBuffer: Buffer | ArrayBuffer,
@@ -22,45 +44,45 @@ export async function removeMetaWatermark(
   const h = meta.height ?? 0;
   if (w < 64 || h < 64) return src.png().toBuffer();
 
+  // Compute watermark area
   const wmW = Math.round(w * WM_WIDTH_FRAC);
   const wmH = Math.round(h * WM_HEIGHT_FRAC);
   const wmX = Math.max(0, w - wmW - Math.round(w * WM_INSET_X));
   const wmY = Math.max(0, h - wmH - Math.round(h * WM_INSET_Y));
 
-  const fontSize = Math.round(h * 0.045);
-  const padX = Math.round(fontSize * 0.8);
-  const padY = Math.round(fontSize * 0.4);
-  const textW = wmW + padX * 2;
-  const textH = wmH + padY * 2;
-  const textX = Math.max(0, wmX - padX);
-  const textY = Math.max(0, wmY - padY);
+  // Load the pre-generated logo
+  const logo = getLogoBuffer();
+  if (!logo) {
+    // Fallback: if logo file is missing, use a solid dark rectangle
+    const overlay = await sharp({
+      create: {
+        width: wmW,
+        height: wmH,
+        channels: 4,
+        background: { r: 10, g: 10, b: 15, alpha: 1 }
+      }
+    }).png().toBuffer();
 
-  // SVG with FULLY OPAQUE dark background + "Nelth-AI" text
-  const svg = `<svg width="${textW}" height="${textH}" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <filter id="textshadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="1" stdDeviation="0.5" flood-color="rgba(0,0,0,0.8)"/>
-    </filter>
-  </defs>
-  <rect width="${textW}" height="${textH}" rx="${Math.round(textH * 0.15)}" ry="${Math.round(textH * 0.15)}" fill="rgb(10,10,15)"/>
-  <text x="50%" y="50%"
-    dominant-baseline="central"
-    text-anchor="middle"
-    font-family="Arial, sans-serif"
-    font-size="${fontSize}"
-    font-weight="900"
-    fill="rgb(255,255,255)"
-    filter="url(#textshadow)"
-    letter-spacing="${Math.round(fontSize * 0.03)}"
-  >Nelth-AI</text>
-</svg>`;
+    return sharp(inputBuf)
+      .composite([{ input: overlay, top: wmY, left: wmX, blend: "over" }])
+      .toFormat(meta_format(inputBuf), { quality: 95 })
+      .toBuffer();
+  }
 
-  const textOverlay = await sharp(Buffer.from(svg, "utf-8"))
+  // Resize the logo to fit the watermark area (preserve aspect ratio, cover)
+  const resizedLogo = await sharp(logo)
+    .resize({
+      width: wmW,
+      height: wmH,
+      fit: "cover",
+      position: "center",
+    })
     .png()
     .toBuffer();
 
+  // Composite the logo over the watermark
   return sharp(inputBuf)
-    .composite([{ input: textOverlay, top: textY, left: textX, blend: "over" }])
+    .composite([{ input: resizedLogo, top: wmY, left: wmX, blend: "over" }])
     .toFormat(meta_format(inputBuf), { quality: 95 })
     .toBuffer();
 }
@@ -74,5 +96,3 @@ function meta_format(buf: Buffer): keyof sharp.FormatEnum {
 
 export function hasWatermarkModel(): boolean { return true; }
 export async function preloadWatermarkModel(): Promise<void> {}
-// trigger redeploy
-// redeploy trigger Sat Sep 19 07:22:53 UTC 2026
