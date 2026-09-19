@@ -38,25 +38,24 @@ export async function removeMetaWatermark(
   // SVG with FULLY OPAQUE dark background + "Nelth-AI" text
   const svg = `<svg width="${textW}" height="${textH}" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <filter id="blur" x="-10%" y="-10%" width="120%" height="120%">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="1.5"/>
+    <filter id="textshadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="1" stdDeviation="0.5" flood-color="rgba(0,0,0,0.8)"/>
     </filter>
   </defs>
-  <rect width="${textW}" height="${textH}" rx="${Math.round(textH * 0.15)}" ry="${Math.round(textH * 0.15)}" fill="rgb(15,15,20)"/>
+  <rect width="${textW}" height="${textH}" rx="${Math.round(textH * 0.15)}" ry="${Math.round(textH * 0.15)}" fill="rgb(10,10,15)"/>
   <text x="50%" y="50%"
     dominant-baseline="central"
     text-anchor="middle"
-    font-family="'Helvetica Neue', Arial, sans-serif"
+    font-family="Arial, sans-serif"
     font-size="${fontSize}"
-    font-weight="800"
-    fill="rgba(255,255,255,0.95)"
-    filter="url(#blur)"
-    letter-spacing="${Math.round(fontSize * 0.02)}"
+    font-weight="900"
+    fill="rgb(255,255,255)"
+    filter="url(#textshadow)"
+    letter-spacing="${Math.round(fontSize * 0.03)}"
   >Nelth-AI</text>
 </svg>`;
 
   const textOverlay = await sharp(Buffer.from(svg, "utf-8"))
-    .blur(0.8)
     .png()
     .toBuffer();
 
