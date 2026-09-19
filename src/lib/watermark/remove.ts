@@ -72,3 +72,4 @@ function meta_format(buf: Buffer): keyof sharp.FormatEnum {
 
 export function hasWatermarkModel(): boolean { return true; }
 export async function preloadWatermarkModel(): Promise<void> {}
+// force deploy Sat Sep 19 07:30:48 UTC 2026
