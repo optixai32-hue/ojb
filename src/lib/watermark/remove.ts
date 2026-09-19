@@ -44,12 +44,14 @@ export async function removeMetaWatermark(
   const wmY = Math.max(0, h - wmH - Math.round(h * WM_INSET_Y));
 
   const logo = getLogoBuffer();
+  console.log("[watermark] logo loaded:", logo ? logo.length + " bytes" : "NULL");
   if (!logo) {
     // Fallback: solid dark rectangle
     const overlay = await sharp({
       create: { width: wmW, height: wmH, channels: 4, background: { r: 10, g: 10, b: 15, alpha: 1 } }
     }).png().toBuffer();
-    return sharp(inputBuf)
+    console.log("[watermark] logo decoded, compositing...");
+  return sharp(inputBuf)
       .composite([{ input: overlay, top: wmY, left: wmX, blend: "over" }])
       .toFormat(meta_format(inputBuf), { quality: 95 }).toBuffer();
   }
@@ -58,6 +60,7 @@ export async function removeMetaWatermark(
     .resize({ width: wmW, height: wmH, fit: "cover", position: "center" })
     .png().toBuffer();
 
+  console.log("[watermark] logo decoded, compositing...");
   return sharp(inputBuf)
     .composite([{ input: resizedLogo, top: wmY, left: wmX, blend: "over" }])
     .toFormat(meta_format(inputBuf), { quality: 95 }).toBuffer();
