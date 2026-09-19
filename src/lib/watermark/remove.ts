@@ -75,3 +75,4 @@ function meta_format(buf: Buffer): keyof sharp.FormatEnum {
 
 export function hasWatermarkModel(): boolean { return true; }
 export async function preloadWatermarkModel(): Promise<void> {}
+// trigger redeploy
